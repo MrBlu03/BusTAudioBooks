@@ -12,6 +12,7 @@
     "recs:inspect": "node scripts/nuvio-inspect.js",
     "recs:list": "node scripts/nuvio-list.js",
     "recs:refresh": "node scripts/refresh-recs.js",
+    "recs:daily": "node scripts/recs-scheduler.js",
     "test:serve": "node test/recs.serve.js"
   },
   "engines": {

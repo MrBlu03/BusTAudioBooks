@@ -655,7 +655,17 @@ async function main() {
     return;
   }
 
-  if (!force && existing && state && state.hash === fingerprint && Array.isArray(existing.items)) {
+  const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+  const isOlderThanADay =
+    existing &&
+    existing.generatedAt &&
+    Date.now() - new Date(existing.generatedAt).getTime() >= ONE_DAY_MS;
+
+  if (isOlderThanADay) {
+    console.log(
+      `Recommendations are older than 24 hours (last generated: ${existing.generatedAt}). Refreshing daily recommendations...`
+    );
+  } else if (!force && existing && state && state.hash === fingerprint && Array.isArray(existing.items)) {
     const stored = Array.isArray(existing.suggestions) ? existing.suggestions : [];
     if (existing.items.length === 0 && stored.length) {
       console.log(

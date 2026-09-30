@@ -23,6 +23,15 @@ function cleanSeriesQuery(name) {
     .trim();
 }
 
+function cleanBookTitle(raw) {
+  return cleanDisplayTitle(raw)
+    .replace(/:\s*(?:unabridged|abridged|a novel).*$/i, "")
+    .replace(/\s*\((?:un)?abridged\)/gi, "")
+    .replace(/\s*,\s*Book\s*\d+/i, "")
+    .replace(/\s*\(Book\s*\d+\)/i, "")
+    .trim();
+}
+
 /**
  * Dynamically queries Audible Catalog API for products in a series.
  */
@@ -57,55 +66,104 @@ async function fetchSeriesFromAudible(seriesName, author = "") {
     // Filter out non-English translations
     if (p.language && !p.language.toLowerCase().includes("english")) continue;
 
+    // Filter out box sets / multi-book collections / samplers
+    const rawTitle = String(p.title || "");
+    if (/\b(?:collection|box\s*set|boxed\s*set|complete\s*(?:audio\s*)?collection|omnibus|sampler)\b/i.test(rawTitle)) {
+      continue;
+    }
+
     const seriesList = Array.isArray(p.series) ? p.series : [];
+    const pubSeries = seriesList.find((s) => /publication\s*order|release\s*order/i.test(s.title));
+    const chronoSeries = seriesList.find((s) => /chronological|author'?s\s*(?:preferred\s*)?order/i.test(s.title));
     // Prioritize exact series title match first, then substring
     const matchedSeries =
       seriesList.find((s) => String(s.title || "").toLowerCase() === lowerTarget) ||
       seriesList.find((s) => {
         const st = String(s.title || "").toLowerCase();
         return st.includes(lowerTarget) || lowerTarget.includes(st);
-      }) ||
-      (lowerAuthor && seriesList[0]);
+      });
 
-    if (!matchedSeries || !matchedSeries.sequence) continue;
+    if (!matchedSeries && !pubSeries && !chronoSeries) continue;
 
-    const seq = parseFloat(matchedSeries.sequence);
-    if (isNaN(seq) || seq <= 0) continue;
+    // Skip multi-book collections where sequence is a range, e.g. "1-3" or "1-7"
+    if (
+      (matchedSeries && matchedSeries.sequence && String(matchedSeries.sequence).includes("-")) ||
+      (pubSeries && pubSeries.sequence && String(pubSeries.sequence).includes("-")) ||
+      (chronoSeries && chronoSeries.sequence && String(chronoSeries.sequence).includes("-"))
+    ) {
+      continue;
+    }
+
+    const baseSeq = matchedSeries && matchedSeries.sequence ? parseFloat(matchedSeries.sequence) : null;
+    const pubSeq = pubSeries && pubSeries.sequence ? parseFloat(pubSeries.sequence) : null;
+    const chronoSeq = chronoSeries && chronoSeries.sequence ? parseFloat(chronoSeries.sequence) : null;
+
+    const seq = chronoSeq != null ? chronoSeq : (baseSeq != null ? baseSeq : pubSeq);
+    if ((seq == null || isNaN(seq) || seq <= 0) && (pubSeq == null || isNaN(pubSeq) || pubSeq <= 0)) continue;
 
     const auth = (p.authors && p.authors[0] && p.authors[0].name) || author || null;
     const desc = cleanSynopsis(p.merchandising_summary || p.product_desc || p.publisher_summary);
     const poster = cleanAudiblePoster(p.product_images && (p.product_images[500] || p.product_images[1024] || p.product_images[0]));
-    const year = p.release_date ? String(p.release_date).slice(0, 4) : null;
+    const year = p.release_date ? parseInt(String(p.release_date).slice(0, 4), 10) : null;
 
     const isDramatized = /dramatized|part \d of \d|sample/i.test(p.title);
+    const cleanedTitle = cleanBookTitle(p.title);
 
     candidates.push({
-      seq,
-      title: cleanDisplayTitle(p.title),
+      seq: seq != null && !isNaN(seq) ? seq : 999,
+      chronoSeq: chronoSeq != null && !isNaN(chronoSeq) ? chronoSeq : seq,
+      pubSeq: pubSeq != null && !isNaN(pubSeq) ? pubSeq : null,
+      title: cleanedTitle,
+      rawTitle: p.title,
       author: auth,
       asin: p.asin,
       poster,
-      year,
+      year: year || null,
       description: desc,
       isDramatized,
-      seriesTitle: matchedSeries.title || seriesName,
+      seriesTitle: (matchedSeries && matchedSeries.title) || (chronoSeries && chronoSeries.title) || (pubSeries && pubSeries.title) || seriesName,
     });
   }
 
   if (!candidates.length) return null;
 
-  // Deduplicate by sequence number: prefer standard full edition over dramatized/parts
-  const bySeq = new Map();
+  // Deduplicate by clean book title: prefer standard full edition over dramatized/parts, and prefer entries with poster
+  const byTitle = new Map();
   for (const c of candidates) {
-    const existing = bySeq.get(c.seq);
+    const key = c.title.toLowerCase().replace(/’/g, "'").replace(/[^a-z0-9]/g, "");
+    if (!key) continue;
+    const existing = byTitle.get(key);
     if (!existing) {
-      bySeq.set(c.seq, c);
-    } else if (existing.isDramatized && !c.isDramatized) {
-      bySeq.set(c.seq, c);
+      byTitle.set(key, c);
+    } else {
+      // Merge sequences across editions
+      if (existing.pubSeq == null && c.pubSeq != null) existing.pubSeq = c.pubSeq;
+      if (existing.chronoSeq == null && c.chronoSeq != null) existing.chronoSeq = c.chronoSeq;
+      if (existing.seq === 999 && c.seq !== 999) existing.seq = c.seq;
+      if (!existing.year && c.year) existing.year = c.year;
+
+      // Prefer unabridged / standard over abridged or dramatized
+      const cIsAbridged = /abridged/i.test(c.rawTitle);
+      const exIsAbridged = /abridged/i.test(existing.rawTitle);
+      if (exIsAbridged && !cIsAbridged) {
+        existing.title = c.title;
+        existing.rawTitle = c.rawTitle;
+        existing.asin = c.asin;
+        if (c.poster) existing.poster = c.poster;
+        if (c.description) existing.description = c.description;
+      } else if (existing.isDramatized && !c.isDramatized) {
+        existing.title = c.title;
+        existing.rawTitle = c.rawTitle;
+        existing.asin = c.asin;
+        if (c.poster) existing.poster = c.poster;
+        if (c.description) existing.description = c.description;
+      } else if (!existing.poster && c.poster) {
+        existing.poster = c.poster;
+      }
     }
   }
 
-  const sortedBooks = Array.from(bySeq.values()).sort((a, b) => a.seq - b.seq);
+  const sortedBooks = Array.from(byTitle.values()).sort((a, b) => a.seq - b.seq);
   const detectedSeriesName = (candidates.find((c) => c.seriesTitle) || {}).seriesTitle || seriesName;
   const detectedAuthor = (candidates.find((c) => c.author) || {}).author || author;
 
@@ -262,6 +320,44 @@ async function findCollectionCover(seriesName, author = "") {
   return null;
 }
 
+const pubYearCache = new TTLCache(24 * 60 * 60 * 1000, 2000);
+
+/**
+ * Dynamically queries Open Library for a book's original publication year.
+ */
+async function fetchPublicationYear(title, author) {
+  if (!title) return null;
+  const key = `${String(title).toLowerCase().trim()}:${String(author || "").toLowerCase().trim()}`;
+  const hit = pubYearCache.get(key);
+  if (hit !== undefined) return hit;
+
+  try {
+    const q = new URLSearchParams({
+      title: title,
+      limit: "1",
+    });
+    if (author) q.set("author", author);
+    const res = await fetch(`https://openlibrary.org/search.json?${q.toString()}`, {
+      headers: { "User-Agent": "bustaudio-addon/2.5" },
+      signal: AbortSignal.timeout(1800),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      const doc = data.docs && data.docs[0];
+      if (doc && doc.first_publish_year) {
+        const year = parseInt(doc.first_publish_year, 10);
+        if (!isNaN(year) && year > 1000 && year <= new Date().getFullYear()) {
+          pubYearCache.set(key, year);
+          return year;
+        }
+      }
+    }
+  } catch (_) {}
+
+  pubYearCache.set(key, null);
+  return null;
+}
+
 /**
  * Fetch series metadata and canonical book reading order dynamically.
  */
@@ -293,9 +389,56 @@ async function fetchSeriesBooks(seriesName, author = "") {
       seriesObj = fetchSeriesFromKnown(seriesName, author);
     }
 
-    if (seriesObj) {
+    if (seriesObj && Array.isArray(seriesObj.books) && seriesObj.books.length > 0) {
+      // Enrich books with publication years concurrently
+      await Promise.all(
+        seriesObj.books.map(async (b) => {
+          if (!b.originalYear) {
+            const y = await withTimeout(
+              fetchPublicationYear(b.title, b.author || seriesObj.author || author),
+              1800,
+              null
+            );
+            if (y) b.originalYear = y;
+          }
+        })
+      );
+
+      // Chronological reading order (in-universe sequence)
+      const chronoBooks = [...seriesObj.books].sort((a, b) => {
+        const sa = a.chronoSeq != null ? a.chronoSeq : (a.seq != null ? a.seq : 999);
+        const sb = b.chronoSeq != null ? b.chronoSeq : (b.seq != null ? b.seq : 999);
+        return sa - sb;
+      });
+
+      // Release / publication order (by original publication year or release sequence)
+      const releaseBooks = [...seriesObj.books].sort((a, b) => {
+        const pa = a.pubSeq != null ? a.pubSeq : (a.originalYear != null ? a.originalYear : null);
+        const pb = b.pubSeq != null ? b.pubSeq : (b.originalYear != null ? b.originalYear : null);
+        if (pa != null && pb != null && pa !== pb) return pa - pb;
+        if (pa != null && pb == null) return -1;
+        if (pa == null && pb != null) return 1;
+
+        const sa = a.chronoSeq != null ? a.chronoSeq : (a.seq != null ? a.seq : 999);
+        const sb = b.chronoSeq != null ? b.chronoSeq : (b.seq != null ? b.seq : 999);
+        return sa - sb;
+      });
+
+      // Determine if reading orders differ
+      const isDualOrder =
+        chronoBooks.length >= 2 &&
+        releaseBooks.length >= 2 &&
+        chronoBooks.some((b, i) => {
+          const rb = releaseBooks[i];
+          return !rb || b.title.toLowerCase() !== rb.title.toLowerCase();
+        });
+
+      seriesObj.books = chronoBooks;
+      seriesObj.releaseBooks = releaseBooks;
+      seriesObj.isDualOrder = isDualOrder;
+
       const colCover = await withTimeout(findCollectionCover(seriesObj.seriesName, seriesObj.author), 2500, null);
-      seriesObj.collectionPoster = colCover || (seriesObj.books[0] && seriesObj.books[0].poster) || null;
+      seriesObj.collectionPoster = colCover || (chronoBooks[0] && chronoBooks[0].poster) || null;
     }
 
     return seriesObj;
@@ -305,6 +448,22 @@ async function fetchSeriesBooks(seriesName, author = "") {
   return result;
 }
 
+function matchTargetFile(book, bookNum, files) {
+  if (!Array.isArray(files) || files.length === 0) return undefined;
+  const lowerBookTitle = book.title.toLowerCase();
+  const matched = files.find((f) => {
+    const fn = (f.name || f.short_name || "").toLowerCase();
+    if (fn.includes(lowerBookTitle)) return true;
+    if (bookNum != null) {
+      const numPadded = bookNum < 10 ? `0${bookNum}` : `${bookNum}`;
+      const numRegex = new RegExp(`(?:^|[\\s._\\-])0?${bookNum}(?:[\\s._\\-]|$)`, "i");
+      if (fn.includes(numPadded) || numRegex.test(fn)) return true;
+    }
+    return false;
+  });
+  return matched ? (matched.name || matched.short_name) : undefined;
+}
+
 /**
  * Builds the complete Stremio Series Meta object with canonical episode list.
  */
@@ -312,7 +471,10 @@ async function fetchSeriesMeta(seriesName, author = "", extraMeta = {}) {
   const seriesData = await fetchSeriesBooks(seriesName, author);
   const cleanName = seriesData ? seriesData.seriesName : seriesName;
   const effAuthor = (seriesData && seriesData.author) || author || "";
-  const books = (seriesData && seriesData.books) || [];
+  const isDualOrder = !!(seriesData && seriesData.isDualOrder);
+  const chronoBooks = (seriesData && seriesData.books) || [];
+  const releaseBooks = (seriesData && seriesData.releaseBooks) || chronoBooks;
+  const files = Array.isArray(extraMeta.files) ? extraMeta.files : [];
 
   const displayName = effAuthor
     ? `${cleanName} Series — ${effAuthor}`
@@ -321,61 +483,103 @@ async function fetchSeriesMeta(seriesName, author = "", extraMeta = {}) {
   const masterPoster =
     extraMeta.poster ||
     (seriesData && seriesData.collectionPoster) ||
-    (books[0] && books[0].poster) ||
+    (chronoBooks[0] && chronoBooks[0].poster) ||
     undefined;
 
-  // Build Stremio videos (Episodes representing Book 1, Book 2... in reading order)
-  const files = Array.isArray(extraMeta.files) ? extraMeta.files : [];
-  const videos = books.map((book, idx) => {
-    const bookNum = book.seq != null ? book.seq : idx + 1;
-    const epNum = Number.isInteger(bookNum) && bookNum > 0 ? bookNum : idx + 1;
+  let videos = [];
 
-    // Check if a file in the parent torrent matches this specific book
-    let matchedTargetFile = undefined;
-    if (files.length > 0) {
-      const lowerBookTitle = book.title.toLowerCase();
-      const matched = files.find((f) => {
-        const fn = (f.name || f.short_name || "").toLowerCase();
-        if (fn.includes(lowerBookTitle)) return true;
-        if (bookNum != null) {
-          const numPadded = bookNum < 10 ? `0${bookNum}` : `${bookNum}`;
-          const numRegex = new RegExp(`(?:^|[\\s._\\-])0?${bookNum}(?:[\\s._\\-]|$)`, "i");
-          if (fn.includes(numPadded) || numRegex.test(fn)) return true;
-        }
-        return false;
-      });
-      if (matched) matchedTargetFile = matched.name || matched.short_name;
-    }
-
-    const epItemId = encodeItemId({
-      type: "series",
-      seriesName: cleanName,
-      bookNumber: bookNum,
-      name: book.title,
-      author: book.author || effAuthor,
-      parentInfohash: extraMeta.infohash || undefined,
-      targetFile: matchedTargetFile,
-      isSeries: true,
+  if (isDualOrder) {
+    // Season 1: Release / Publication Order
+    const s1Videos = releaseBooks.map((book, idx) => {
+      const epNum = idx + 1;
+      const yr = book.originalYear || book.year;
+      const yearLabel = yr ? ` (${yr})` : "";
+      return {
+        id: encodeItemId({
+          type: "series",
+          seriesName: cleanName,
+          bookNumber: epNum,
+          name: book.title,
+          author: book.author || effAuthor,
+          parentInfohash: extraMeta.infohash || undefined,
+          targetFile: matchTargetFile(book, epNum, files),
+          isSeries: true,
+        }),
+        title: `Book ${epNum}${yearLabel}: ${book.title}`,
+        season: 1,
+        episode: epNum,
+        released: yr ? String(yr) : undefined,
+        thumbnail: book.poster || masterPoster,
+        overview: book.description || undefined,
+      };
     });
 
-    return {
-      id: epItemId,
-      title: `Book ${bookNum}: ${book.title}`,
-      season: 1,
-      episode: epNum,
-      released: book.year || undefined,
-      thumbnail: book.poster || masterPoster,
-      overview: book.description || undefined,
-    };
-  });
+    // Season 2: Chronological Story Order
+    const s2Videos = chronoBooks.map((book, idx) => {
+      const epNum = idx + 1;
+      return {
+        id: encodeItemId({
+          type: "series",
+          seriesName: cleanName,
+          bookNumber: epNum,
+          name: book.title,
+          author: book.author || effAuthor,
+          parentInfohash: extraMeta.infohash || undefined,
+          targetFile: matchTargetFile(book, epNum, files),
+          isSeries: true,
+        }),
+        title: `Book ${epNum}: ${book.title}`,
+        season: 2,
+        episode: epNum,
+        released: book.originalYear || book.year ? String(book.originalYear || book.year) : undefined,
+        thumbnail: book.poster || masterPoster,
+        overview: book.description || undefined,
+      };
+    });
 
-  const descLines = [
-    `📚 Canonical Audiobook Series (${books.length} Books in Reading Order)`,
-  ];
+    videos = [...s1Videos, ...s2Videos];
+  } else {
+    // Single canonical order -> Season 1 only (deduplicated)
+    videos = chronoBooks.map((book, idx) => {
+      const bookNum = book.seq != null ? book.seq : idx + 1;
+      const epNum = Number.isInteger(bookNum) && bookNum > 0 ? bookNum : idx + 1;
+      return {
+        id: encodeItemId({
+          type: "series",
+          seriesName: cleanName,
+          bookNumber: epNum,
+          name: book.title,
+          author: book.author || effAuthor,
+          parentInfohash: extraMeta.infohash || undefined,
+          targetFile: matchTargetFile(book, epNum, files),
+          isSeries: true,
+        }),
+        title: `Book ${epNum}: ${book.title}`,
+        season: 1,
+        episode: epNum,
+        released: book.originalYear || book.year ? String(book.originalYear || book.year) : undefined,
+        thumbnail: book.poster || masterPoster,
+        overview: book.description || undefined,
+      };
+    });
+  }
+
+  const descLines = [];
+  if (isDualOrder) {
+    descLines.push(
+      `📚 Dual Reading Orders Available:\n• Season 1: Release / Publication Order (${releaseBooks.length} Books)\n• Season 2: Chronological Story Order (${chronoBooks.length} Books)`
+    );
+  } else {
+    descLines.push(`📚 Canonical Audiobook Series (${chronoBooks.length} Books in Reading Order)`);
+  }
   if (effAuthor) descLines.push(`By ${effAuthor}`);
-  if (books.length > 0) {
-    const bookList = books.slice(0, 10).map((b) => `• Book ${b.seq}: ${b.title}`).join("\n");
-    descLines.push(`\nReading Order:\n${bookList}${books.length > 10 ? `\n...and ${books.length - 10} more` : ""}`);
+  if (isDualOrder) {
+    const s1List = releaseBooks.slice(0, 6).map((b, i) => `  ${i + 1}. ${b.title}${b.originalYear ? ` (${b.originalYear})` : ""}`).join("\n");
+    const s2List = chronoBooks.slice(0, 6).map((b, i) => `  ${i + 1}. ${b.title}`).join("\n");
+    descLines.push(`Season 1 (Release Order):\n${s1List}${releaseBooks.length > 6 ? `\n  ...and ${releaseBooks.length - 6} more` : ""}\n\nSeason 2 (Chronological Order):\n${s2List}${chronoBooks.length > 6 ? `\n  ...and ${chronoBooks.length - 6} more` : ""}`);
+  } else if (chronoBooks.length > 0) {
+    const bookList = chronoBooks.slice(0, 10).map((b, i) => `• Book ${b.seq != null ? b.seq : i + 1}: ${b.title}`).join("\n");
+    descLines.push(`Reading Order:\n${bookList}${chronoBooks.length > 10 ? `\n...and ${chronoBooks.length - 10} more` : ""}`);
   }
 
   return {
@@ -385,7 +589,7 @@ async function fetchSeriesMeta(seriesName, author = "", extraMeta = {}) {
     background: masterPoster,
     posterShape: "square",
     description: descLines.filter(Boolean).join("\n\n"),
-    releaseInfo: (books[0] && books[0].year) || undefined,
+    releaseInfo: (chronoBooks[0] && (chronoBooks[0].originalYear || chronoBooks[0].year)) || undefined,
     genres: [cleanName, "Audiobook", "Series"],
     cast: effAuthor ? [effAuthor] : undefined,
     videos: videos.length > 0 ? videos : undefined,

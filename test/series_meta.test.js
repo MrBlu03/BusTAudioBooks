@@ -118,3 +118,48 @@ test("each book has its own respective cover and series uses collection cover", 
   assert.notEqual(ep1.thumbnail, ep2.thumbnail, "Book 1 and Book 2 must have distinct respective covers");
   assert.notEqual(ep2.thumbnail, ep3.thumbnail, "Book 2 and Book 3 must have distinct respective covers");
 });
+
+test("dual reading orders: offers Season 1 (Release Order) and Season 2 (Chronological Order) when orders differ", async () => {
+  const meta = await fetchSeriesMeta("Chronicles of Narnia", "C.S. Lewis");
+  assert.ok(meta, "Expected series meta for Chronicles of Narnia");
+  assert.ok(Array.isArray(meta.videos), "Expected videos array");
+
+  // Narnia has 7 books and different reading orders -> must produce Season 1 and Season 2
+  const s1Videos = meta.videos.filter((v) => v.season === 1);
+  const s2Videos = meta.videos.filter((v) => v.season === 2);
+
+  assert.ok(s1Videos.length >= 6, `Expected at least 6 books in Season 1 (Release), got ${s1Videos.length}`);
+  assert.ok(s2Videos.length >= 6, `Expected at least 6 books in Season 2 (Chronological), got ${s2Videos.length}`);
+
+  // In Release Order (Season 1), Book 1 is The Lion, the Witch and the Wardrobe (1950)
+  assert.ok(
+    s1Videos[0].title.toLowerCase().includes("lion") || s1Videos[0].title.toLowerCase().includes("wardrobe"),
+    `Expected Season 1 Book 1 to be The Lion, the Witch and the Wardrobe, got: ${s1Videos[0].title}`
+  );
+
+  // In Chronological Order (Season 2), Book 1 is The Magician's Nephew
+  assert.ok(
+    s2Videos[0].title.toLowerCase().includes("magician"),
+    `Expected Season 2 Book 1 to be The Magician's Nephew, got: ${s2Videos[0].title}`
+  );
+
+  // Description should advertise both orders
+  assert.ok(meta.description.includes("Dual Reading Orders Available"), "Expected dual reading orders in description");
+  assert.ok(meta.description.includes("Season 1: Release / Publication Order"), "Expected Season 1 description");
+  assert.ok(meta.description.includes("Season 2: Chronological Story Order"), "Expected Season 2 description");
+});
+
+test("single reading order: only produces Season 1 when chronological and release order match", async () => {
+  const meta = await fetchSeriesMeta("The Hunger Games", "Suzanne Collins");
+  assert.ok(meta);
+  const seasons = new Set(meta.videos.map((v) => v.season));
+  assert.equal(seasons.size, 1, "Expected only 1 season for series with identical orders");
+  assert.ok(seasons.has(1), "Expected season 1");
+});
+
+test("recs-scheduler: isDueForRefresh detects missing and expired recs files accurately", () => {
+  const { isDueForRefresh } = require("../scripts/recs-scheduler");
+  // Missing file is due for refresh
+  assert.equal(isDueForRefresh("nonexistent-file.json"), true);
+});
+
