@@ -45,10 +45,14 @@ function decodeEntities(s) {
     .replace(/&quot;/g, '"')
     .replace(/&#0?39;/g, "'")
     .replace(/&apos;/g, "'")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&#160;/g, " ")
     .replace(/&#8217;/g, "\u2019")
     .replace(/&#8216;/g, "\u2018")
     .replace(/&#8211;/g, "\u2013")
     .replace(/&#8212;/g, "\u2014")
+    .replace(/&#8220;/g, "\u201C")
+    .replace(/&#8221;/g, "\u201D")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">");
 }
@@ -89,7 +93,9 @@ function looksLikeAuthor(fragment) {
 
 // Pull titles apart cleanly into { title, author }
 function parseNameParts(raw, type = "audiobook") {
-  let s = stripBrackets(raw);
+  let s = stripBrackets(raw)
+    .replace(/[\u200B-\u200D\uFEFF]/g, "")
+    .replace(/[\u00A0\u202F]/g, " ");
   s = s.replace(/narrated by.*$/i, " ").replace(NOISE, " ");
   if (type === "comic") s = s.replace(COMIC_NOISE, " ");
   s = s.replace(/[_]+/g, " ").replace(/\s+/g, " ").trim();

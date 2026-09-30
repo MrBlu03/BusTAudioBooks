@@ -275,6 +275,8 @@ const KNOWN_SERIES = [
 
 function cleanTitleForParsing(raw) {
   return String(raw || "")
+    .replace(/[\u200B-\u200D\uFEFF]/g, "")
+    .replace(/[\u00A0\u202F]/g, " ")
     .replace(/\[(?:mp3|m4b|m4a|flac|aac|ogg|opus|wav|cbr|cbz)\]/gi, " ")
     .replace(/\[\d+\s?kbps\]/gi, " ")
     .replace(/\b\d+\s?kbps\b/gi, " ")
@@ -292,6 +294,8 @@ function cleanTitleForParsing(raw) {
 // for a crisp card display in Stremio/Nuvio
 function cleanDisplayTitle(raw) {
   let s = String(raw || "")
+    .replace(/[\u200B-\u200D\uFEFF]/g, "")
+    .replace(/[\u00A0\u202F]/g, " ")
     .replace(/\\'/g, "'")
     .replace(/\[[^\]]*\]/g, " ")
     .replace(/\((?:un)?abridged\)/gi, " ")

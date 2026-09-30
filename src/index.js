@@ -901,6 +901,7 @@ async function handleCatalog(req, res, extraRaw) {
     metas.unshift(seriesCard);
   }
 
+  if (res.headersSent || req.destroyed) return;
   res.json({ metas });
 }
 
@@ -1020,10 +1021,12 @@ async function handleMeta(req, res) {
     }
   }
 
+  if (res.headersSent || req.destroyed) return;
+  const hasSeriesVideos = isSeries && Array.isArray(videos) && videos.length > 0;
   res.json({
     meta: {
       id: req.params.id,
-      type: isSeries ? "series" : (req.params.type || "audiobook"),
+      type: hasSeriesVideos ? "series" : (req.params.type === "series" ? "audiobook" : (req.params.type || "audiobook")),
       name: (seriesMeta && seriesMeta.name) || prettyName(item.name) || "Audiobook",
       poster: (seriesMeta && seriesMeta.poster) || meta.poster || undefined,
       background: (seriesMeta && seriesMeta.background) || meta.poster || undefined,
@@ -1093,7 +1096,8 @@ async function resolveForItem(cfg, item) {
     }
   }
 
-  const key = streamKey(cfg.apiKey, type, item.infohash || item.torrentUrl || item.name);
+  const fallbackKey = `${item.author || ""}::${item.seriesName || ""}::${item.season || ""}::${item.bookNumber || ""}::${item.name || ""}`;
+  const key = streamKey(cfg.apiKey, type, item.infohash || item.torrentUrl || fallbackKey);
   const cachedStreams = streamCache.get(key);
   if (cachedStreams) return { ready: true, status: "ok", streams: cachedStreams };
 
@@ -1122,6 +1126,7 @@ async function handleStream(req, res) {
 
   try {
     const result = await resolveForItem(cfg, item);
+    if (res.headersSent || req.destroyed) return;
     if (result.ready) {
       let streams = result.streams || [];
       if (item.targetFile && streams.length > 1) {
@@ -1153,6 +1158,7 @@ async function handleStream(req, res) {
     });
   } catch (err) {
     console.error("stream error:", err.message);
+    if (res.headersSent || req.destroyed) return;
     return res.json({
       streams: [{ name: "BusTAudioBooks", title: `⚠️ ${err.message}` }],
     });

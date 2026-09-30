@@ -116,7 +116,14 @@ function normalizeAudibleProduct(p) {
   const sInfo = parseSeriesAndBook(p.title, author, seriesObj ? seriesObj.title : null);
 
   const seriesName = (seriesObj && seriesObj.title) || (sInfo && sInfo.seriesName) || null;
-  const bookNumber = seriesObj && seriesObj.sequence ? parseFloat(seriesObj.sequence) : (sInfo ? sInfo.bookNumber : null);
+  let bookNumber = null;
+  if (seriesObj && seriesObj.sequence) {
+    const parsedSeq = parseFloat(String(seriesObj.sequence).replace(/^[^\d.]*/, ""));
+    if (!isNaN(parsedSeq)) bookNumber = parsedSeq;
+  }
+  if (bookNumber == null && sInfo && sInfo.bookNumber != null) {
+    bookNumber = sInfo.bookNumber;
+  }
   const isSeries = !!(sInfo && sInfo.isCollection);
 
   return {

@@ -94,6 +94,7 @@ async function tbFetch(path, { apiKey, method = "GET", body, query, headers } = 
     method,
     headers: Object.keys(reqHeaders).length > 0 ? reqHeaders : undefined,
     body,
+    signal: AbortSignal.timeout(15000),
   });
   let json;
   try {
@@ -392,9 +393,16 @@ async function resolveStreams(apiKey, { magnet, infohash, name, torrentUrl, inst
 
   // 3. Build a stream per relevant file (audio files, or comic archives/pages).
   const wantFile = kind === "comic" ? isComicFile : isAudioFile;
-  const matchedFiles = (torrent.files || [])
+  const filesList = Array.isArray(torrent.files) ? torrent.files : [];
+  const matchedFiles = filesList
     .filter((f) => wantFile(f.name || f.short_name))
-    .sort((a, b) => String(a.name).localeCompare(String(b.name), undefined, { numeric: true }));
+    .sort((a, b) =>
+      String(a.short_name || a.name || "").localeCompare(
+        String(b.short_name || b.name || ""),
+        undefined,
+        { numeric: true }
+      )
+    );
 
   // Request links concurrently (bounded) — a loose-image comic can have
   // hundreds of page files, and doing these serially would take minutes.

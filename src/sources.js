@@ -47,14 +47,24 @@ function decodeEntities(s) {
     .replace(/&#0?38;/g, "&")
     .replace(/&quot;/g, '"')
     .replace(/&#0?39;/g, "'")
+    .replace(/&apos;/g, "'")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&#160;/g, " ")
     .replace(/&#8217;/g, "\u2019")
     .replace(/&#8216;/g, "\u2018")
     .replace(/&#8211;/g, "\u2013")
+    .replace(/&#8212;/g, "\u2014")
+    .replace(/&#8220;/g, "\u201C")
+    .replace(/&#8221;/g, "\u201D")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">");
 }
 function clean(s) {
-  return decodeEntities(stripTags(s)).replace(/\s+/g, " ").trim();
+  return decodeEntities(stripTags(s))
+    .replace(/[\u200B-\u200D\uFEFF]/g, "")
+    .replace(/[\u00A0\u202F]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 function sizeToBytes(numStr, unit) {
   const n = parseFloat(String(numStr).replace(/,/g, ""));
@@ -302,7 +312,10 @@ async function searchJackett(config, query, categories = AUDIOBOOK_CATEGORIES) {
   url.searchParams.set("Query", query);
   for (const cat of categories) url.searchParams.append("Category[]", String(cat));
 
-  const res = await fetch(url, { headers: { Accept: "application/json" } });
+  const res = await fetch(url, {
+    headers: { Accept: "application/json" },
+    signal: AbortSignal.timeout(parseInt(process.env.JACKETT_TIMEOUT_MS || "8000", 10)),
+  });
   if (!res.ok) throw new Error(`Jackett HTTP ${res.status}`);
   const json = await res.json();
   const results = Array.isArray(json.Results) ? json.Results : [];
@@ -427,4 +440,5 @@ module.exports = {
   _parseComicTags: parseComicTags,
   _searchJackett: searchJackett,
   _searchAbb: searchAudiobookBay,
+  _clean: clean,
 };

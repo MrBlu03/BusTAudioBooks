@@ -20,6 +20,7 @@ function encodeItemId(item) {
       sn: item.seriesName || undefined,
       bn: item.bookNumber != null ? item.bookNumber : undefined,
       a: item.author || undefined,
+      se: item.season != null ? item.season : undefined,
       is: item.isSeries ? 1 : undefined,
       ph: item.parentInfohash || undefined,
       // "Why we picked this" for the personal-recommendations row. Optional and
@@ -50,6 +51,7 @@ function decodeItemId(id) {
       isSeries: !!(obj.is || obj.t === "s"),
       seriesName: obj.sn || null,
       bookNumber: obj.bn != null ? obj.bn : null,
+      season: obj.se != null ? obj.se : 1,
       author: obj.a || null,
       parentInfohash: obj.ph || null,
       targetFile: obj.tf || null,
