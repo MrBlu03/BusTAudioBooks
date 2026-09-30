@@ -1,5 +1,5 @@
 # BusTAudioBooks — Handover Brief
-Commit `766bd56`, tree clean, nothing pushed. Freshly built image verified running in the container.
+Commit `3fef985`, tree clean, nothing pushed. Freshly built image verified running in the container.
 
 ## 1. Standing constraints — do not break these
 - **No GitHub work.** `AFK-Goblin` is not the user's account. Commits stay local on `main`. Never push, create a repo, or install `gh`.
@@ -61,7 +61,7 @@ Genre rows sampled live: Horror / In Your TorBox / Popular Series / Science Fict
 - Nuvio credentials were pasted into chat; they live in gitignored `.env`. Rotation was recommended and needs confirming.
 
 ## 8. Commits (newest first)
-- `PENDING` fix: resolve slow stream loading, target file matching, and infinite resolution loop
+- `3fef985` fix: resolve slow stream loading, target file matching, and infinite resolution loop
 - `766bd56` fix: resolve Foundation series metadata mismatch, dual reading orders, and collection deduplication
 - `3e90f43` feat: fix series release orders, prioritize series in search, and deduplicate results
 - `e8679ab` feat: default recommended series books to series view with deduplication
