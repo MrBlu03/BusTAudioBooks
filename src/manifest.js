@@ -69,7 +69,7 @@ function buildManifest({ withRecs = true } = {}) {
     name: "BusTAudioBooks",
     description:
       "Search audiobooks and stream or download them through your TorBox account.",
-    types: ["other", "audiobook"],
+    types: ["other", "audiobook", "series"],
     // Only ids we mint get routed to this addon's meta/stream handlers.
     idPrefixes: [ID_PREFIX],
     resources: ["catalog", "meta", "stream"],

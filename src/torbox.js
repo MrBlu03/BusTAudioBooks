@@ -437,6 +437,50 @@ async function resolveStreams(apiKey, { magnet, infohash, name, torrentUrl, inst
   return { ready: true, streams, status: "ok" };
 }
 
+// Retrieve cached file list for a torrent hash directly from TorBox checkcached or active torrents.
+// Used for dynamically populating episodic series/collections without hardcoding.
+async function getTorrentFiles(apiKey, hash) {
+  if (!hash) return [];
+  const cleanHash = String(hash).toLowerCase();
+  try {
+    const json = await tbFetch("/torrents/checkcached", {
+      apiKey,
+      query: { hash: cleanHash, format: "object", list_files: "true" },
+    });
+    if (json && json.success && json.data && json.data[cleanHash]) {
+      const entry = json.data[cleanHash];
+      const files = Array.isArray(entry.files) ? entry.files : [];
+      if (files.length > 0) {
+        return files
+          .filter((f) => isAudioFile(f.name || f.short_name))
+          .sort((a, b) =>
+            String(a.name || a.short_name).localeCompare(String(b.name || b.short_name), undefined, {
+              numeric: true,
+              sensitivity: "base",
+            })
+          );
+      }
+    }
+  } catch (_) {}
+
+  // Fallback: check if the torrent is already in the user's account
+  try {
+    const torrent = await findTorrentByHash(apiKey, cleanHash);
+    if (torrent && Array.isArray(torrent.files) && torrent.files.length > 0) {
+      return torrent.files
+        .filter((f) => isAudioFile(f.name || f.short_name))
+        .sort((a, b) =>
+          String(a.name || a.short_name).localeCompare(String(b.name || b.short_name), undefined, {
+            numeric: true,
+            sensitivity: "base",
+          })
+        );
+    }
+  } catch (_) {}
+
+  return [];
+}
+
 module.exports = {
   API_BASE,
   isAudioFile,
@@ -454,5 +498,6 @@ module.exports = {
   controlTorrent,
   requestDownloadLink,
   resolveStreams,
+  getTorrentFiles,
   formatBytes,
 };

@@ -487,55 +487,33 @@ function sortInSeriesOrder(items) {
   });
 }
 
-const FOUNDATION_SERIES_PACK = {
-  infohash: "ecef732d642e3c980dffbb8b335dc5f22cdfc4b0",
-  magnet:
-    "magnet:?xt=urn:btih:ecef732d642e3c980dffbb8b335dc5f22cdfc4b0&dn=Foundation+Series+1-7+-+Isaac+Asimov",
-  format: "M4B",
-  bitrate: "128 kbps",
-  books: [
-    { num: 1, name: "Foundation (Book 1) - Isaac Asimov", targetFile: "Foundation.m4b", size: 518191005 },
-    { num: 2, name: "Foundation and Empire (Book 2) - Isaac Asimov", targetFile: "Foundation and Empire.m4b", size: 650485440 },
-    { num: 3, name: "Second Foundation (Book 3) - Isaac Asimov", targetFile: "Second Foundation.m4b", size: 624134429 },
-    { num: 4, name: "Foundation's Edge (Book 4) - Isaac Asimov", targetFile: "Foundation’s Edge.m4b", size: 982398999 },
-    { num: 5, name: "Foundation and Earth (Book 5) - Isaac Asimov", targetFile: "Foundation and Earth.m4b", size: 1027170171 },
-    { num: 6, name: "Prelude to Foundation (Book 6) - Isaac Asimov", targetFile: "Prelude to Foundation.m4b", size: 928855837 },
-    { num: 7, name: "Forward the Foundation (Book 7) - Isaac Asimov", targetFile: "Forward the Foundation.m4b", size: 900568355 },
-  ],
-};
+// Dynamically clean raw torrent file paths into human-friendly episode titles.
+// e.g. "Foundation Series/02 - Foundation and Empire.m4b" -> "Foundation and Empire"
+// e.g. "01. Harry Potter and the Sorcerer's Stone [128kbps].mp3" -> "Harry Potter and the Sorcerer's Stone"
+function cleanEpisodeTitle(fileName) {
+  if (!fileName) return "Episode";
+  let s = String(fileName).split(/[/\\]/).pop(); // basename
+  s = s.replace(/\.[a-z0-9]{2,5}$/i, ""); // strip audio extension
+  // Strip leading track or index numbers like "01 - ", "01. ", "01 ", "Track 01 - ", "CD 1 - "
+  s = s.replace(/^(?:track|cd|disk|disc)?\s*0?([0-9]{1,3})\s*[-–—.:\s]\s*/i, "");
+  s = s.replace(/[._]+/g, " "); // normalize dots and underscores
+  // Strip release codec/bitrate noise and bracket tags
+  s = s.replace(/\[[^\]]*\]/g, " ").replace(/\([^)]*\)/g, " ");
+  s = s.replace(/\b(?:mp3|m4b|flac|aac|64kbps|128kbps|256kbps|unabridged|abridged|cd\s*\d+)\b/gi, " ");
+  s = s.replace(/\s+/g, " ").trim();
+  return s || fileName;
+}
 
-function expandSeriesPacks(items, query) {
-  const q = String(query || "").toLowerCase();
-  if (/\b(?:foundation|asimov)\b/i.test(q)) {
-    const unpacked = FOUNDATION_SERIES_PACK.books.map((b) => ({
-      name: b.name,
-      infohash: FOUNDATION_SERIES_PACK.infohash,
-      magnet: FOUNDATION_SERIES_PACK.magnet,
-      format: FOUNDATION_SERIES_PACK.format,
-      bitrate: FOUNDATION_SERIES_PACK.bitrate,
-      size: b.size,
-      author: "Isaac Asimov",
-      targetFile: b.targetFile,
-      cached: true,
-      seriesInfo: { seriesName: "foundation", bookNumber: b.num, isCollection: false },
-    }));
-
-    // Filter out multi-book omnibus collections (e.g. 1-7 packs, trilogies)
-    // so every book is presented as its own separate card
-    const filtered = items.filter((r) => {
-      const s = parseSeriesAndBook(r.name, r.author, query);
-      return !s.isCollection;
-    });
-
-    return [...unpacked, ...filtered];
-  }
-  return items;
+// Pass-through without hardcoding: series packs are now handled dynamically as episodic series
+function expandSeriesPacks(items) {
+  return items || [];
 }
 
 module.exports = {
   KNOWN_SERIES,
   cleanTitleForParsing,
   cleanDisplayTitle,
+  cleanEpisodeTitle,
   parseSeriesAndBook,
   getBookKey,
   sortInSeriesOrder,

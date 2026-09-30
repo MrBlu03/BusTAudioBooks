@@ -16,7 +16,7 @@ const { enrich } = require("./metadata");
 const { encodeItemId, decodeItemId } = require("./itemid");
 const { TTLCache, pLimit, withTimeout } = require("./cache");
 const { makeAccess } = require("./access");
-const { getBookKey, sortInSeriesOrder, parseSeriesAndBook, cleanDisplayTitle, expandSeriesPacks } = require("./series");
+const { getBookKey, sortInSeriesOrder, parseSeriesAndBook, cleanDisplayTitle, cleanEpisodeTitle, expandSeriesPacks } = require("./series");
 const torbox = require("./torbox");
 const nuvio = require("./nuvio");
 
@@ -627,21 +627,26 @@ async function handleCatalog(req, res, extraRaw) {
     })
   );
 
-  const metas = paged.map((r) => ({
-    id: encodeItemId(r),
-    type: req.params.type || "other",
-    name: prettyName(r.name),
-    poster: r.poster || undefined,
-    posterShape: "square",
-    description:
-      detailLine([
-        r.cached ? "⚡ Instant" : null,
-        r.format,
-        r.bitrate,
-        torbox.formatBytes(r.size),
-        r.author,
-      ]) || r.tracker,
-  }));
+  const metas = paged.map((r) => {
+    const sInfo = parseSeriesAndBook(r.name, r.author, searchQuery);
+    const isSeries = !!(sInfo && sInfo.isCollection);
+    return {
+      id: encodeItemId(r),
+      type: isSeries ? "series" : (req.params.type || "other"),
+      name: prettyName(r.name),
+      poster: r.poster || undefined,
+      posterShape: "square",
+      description:
+        detailLine([
+          r.cached ? "⚡ Instant" : null,
+          isSeries ? "📚 Series Collection" : null,
+          r.format,
+          r.bitrate,
+          torbox.formatBytes(r.size),
+          r.author,
+        ]) || r.tracker,
+    };
+  });
   res.json({ metas });
 }
 
@@ -659,16 +664,44 @@ async function handleMeta(req, res) {
   const item = decodeItemId(req.params.id);
   if (!item) return res.json({ meta: null });
 
-  const [meta, isCached] = await Promise.all([
+  const [meta, isCached, files] = await Promise.all([
     withTimeout(enrich(item.name), 3500, { poster: null, author: null, description: null, year: null }),
     item.infohash
       ? withTimeout(torbox.checkCached(cfg.apiKey, item.infohash), 4000, false)
       : Promise.resolve(false),
+    item.infohash
+      ? withTimeout(torbox.getTorrentFiles(cfg.apiKey, item.infohash), 4000, [])
+      : Promise.resolve([]),
   ]);
 
   // Runtime: prefer the real figure from the metadata provider over any
   // "[128 kbps]" tag scraped out of the release filename.
   const runtime = formatRuntime(meta.duration);
+
+  // If the torrent contains multiple audio files, dynamically generate sequential episodes
+  let videos = undefined;
+  let isSeries = req.params.type === "series";
+  if (Array.isArray(files) && files.length > 1) {
+    isSeries = true;
+    videos = files.map((file, idx) => {
+      const epNum = idx + 1;
+      const fName = file.name || file.short_name || `Episode ${epNum}`;
+      const epTitle = cleanEpisodeTitle(fName);
+      const epItem = {
+        ...item,
+        targetFile: file.name || file.short_name,
+        name: epTitle,
+      };
+      return {
+        id: encodeItemId(epItem),
+        title: epTitle,
+        season: 1,
+        episode: epNum,
+        released: meta.year || undefined,
+        thumbnail: meta.poster || undefined,
+      };
+    });
+  }
 
   const facts = detailLine([
     meta.rating ? `⭐ ${meta.rating}/5` : null,
@@ -682,6 +715,9 @@ async function handleMeta(req, res) {
   ]);
 
   const descParts = [];
+  if (videos && videos.length > 1) {
+    descParts.push(`📖 Series / Multi-Part Audio Collection (${videos.length} Episodes/Books)`);
+  }
   // The personal-recommendations row carries the model's "why this book". It is
   // the only thing distinguishing these tiles from a normal search result, so
   // it leads.
@@ -709,7 +745,7 @@ async function handleMeta(req, res) {
   res.json({
     meta: {
       id: req.params.id,
-      type: req.params.type || "audiobook",
+      type: isSeries ? "series" : (req.params.type || "audiobook"),
       name: prettyName(item.name) || "Audiobook",
       poster: meta.poster || undefined,
       background: meta.poster || undefined,
@@ -721,6 +757,7 @@ async function handleMeta(req, res) {
       // is what most audio addons abuse for this. `cast` keeps the author.
       director: meta.narrator ? [meta.narrator] : undefined,
       cast: meta.author ? [meta.author] : undefined,
+      videos,
     },
   });
 }

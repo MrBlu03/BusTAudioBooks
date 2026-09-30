@@ -166,3 +166,19 @@ test("deduplicates Dark Disciple releases and cleans display title", () => {
   assert.equal(k1, k2);
 });
 
+test("cleanEpisodeTitle dynamically strips path, track numbers, and codec tags", () => {
+  const { cleanEpisodeTitle } = require("../src/series");
+  assert.equal(
+    cleanEpisodeTitle("Foundation Series/02 - Foundation and Empire.m4b"),
+    "Foundation and Empire"
+  );
+  assert.equal(
+    cleanEpisodeTitle("01. Harry Potter and the Sorcerer's Stone [128kbps].mp3"),
+    "Harry Potter and the Sorcerer's Stone"
+  );
+  assert.equal(
+    cleanEpisodeTitle("Dune Chronicles 1-6/01 - Dune.m4b"),
+    "Dune"
+  );
+});
+
