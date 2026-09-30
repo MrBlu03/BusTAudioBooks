@@ -27,6 +27,7 @@ const audnexus = require("../src/audnexus");
 const libex = require("../src/libex");
 const sources = require("../src/sources");
 const { parseNameParts } = require("../src/metadata");
+const { parseSeriesAndBook } = require("../src/series");
 const { searchTermFor, titleMatches } = require("../src/recs");
 
 const ROOT = path.join(__dirname, "..");
@@ -483,11 +484,20 @@ async function resolveRecs(recs, cfg) {
       meta = await audnexus.lookupAudnexus(rec.title, rec.author);
     } catch (_) {}
 
+    let series = (meta && meta.series) || null;
+    let seriesIndex = (meta && meta.seriesIndex) || null;
+    if (!series) {
+      const s1 = parseNameParts(hit.name, "audiobook");
+      const s2 = parseSeriesAndBook(hit.name, rec.author);
+      series = (s2 && s2.seriesName) || (s1 && s1.series) || null;
+      seriesIndex = s2 && s2.bookNumber != null ? s2.bookNumber : null;
+    }
+
     resolved.push({
       ...rec,
       poster: (meta && meta.poster) || null,
-      series: (meta && meta.series) || null,
-      seriesIndex: (meta && meta.seriesIndex) || null,
+      series: series || null,
+      seriesIndex: seriesIndex != null ? seriesIndex : null,
       narrator: (meta && meta.narrator) || null,
       rating: (meta && meta.rating) || null,
       duration: (meta && meta.duration) || null,

@@ -64,6 +64,9 @@ function getRecs(cfg = null) {
             title: String(r.title || "").trim(),
             author: r.author ? String(r.author).trim() : null,
             reason: r.reason ? String(r.reason).trim() : null,
+            series: r.series ? String(r.series).trim() : null,
+            seriesIndex: r.seriesIndex != null ? r.seriesIndex : null,
+            poster: r.poster ? String(r.poster).trim() : null,
             release: {
               name: String(r.release.name || "").trim(),
               infohash: r.release.infohash || null,

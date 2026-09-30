@@ -339,7 +339,7 @@ async function fetchPublicationYear(title, author) {
     if (author) q.set("author", author);
     const res = await fetch(`https://openlibrary.org/search.json?${q.toString()}`, {
       headers: { "User-Agent": "bustaudio-addon/2.5" },
-      signal: AbortSignal.timeout(1800),
+      signal: AbortSignal.timeout(800),
     });
     if (res.ok) {
       const data = await res.json();
@@ -390,13 +390,14 @@ async function fetchSeriesBooks(seriesName, author = "") {
     }
 
     if (seriesObj && Array.isArray(seriesObj.books) && seriesObj.books.length > 0) {
-      // Enrich books with publication years concurrently
+      // Enrich books with publication years concurrently (sample first 6 books to detect reading order)
+      const booksToEnrich = seriesObj.books.slice(0, 6);
       await Promise.all(
-        seriesObj.books.map(async (b) => {
+        booksToEnrich.map(async (b) => {
           if (!b.originalYear) {
             const y = await withTimeout(
               fetchPublicationYear(b.title, b.author || seriesObj.author || author),
-              1800,
+              800,
               null
             );
             if (y) b.originalYear = y;
@@ -448,7 +449,7 @@ async function fetchSeriesBooks(seriesName, author = "") {
   return result;
 }
 
-function matchTargetFile(book, bookNum, files) {
+function matchTargetFile(book, bookNum, files, recommendedBook) {
   if (!Array.isArray(files) || files.length === 0) return undefined;
   const lowerBookTitle = book.title.toLowerCase();
   const matched = files.find((f) => {
@@ -461,7 +462,14 @@ function matchTargetFile(book, bookNum, files) {
     }
     return false;
   });
-  return matched ? (matched.name || matched.short_name) : undefined;
+  if (matched) return matched.name || matched.short_name;
+  if (files.length === 1 && recommendedBook) {
+    const recLower = String(recommendedBook).toLowerCase().trim();
+    if (lowerBookTitle.includes(recLower) || recLower.includes(lowerBookTitle)) {
+      return files[0].name || files[0].short_name;
+    }
+  }
+  return undefined;
 }
 
 /**
@@ -475,6 +483,7 @@ async function fetchSeriesMeta(seriesName, author = "", extraMeta = {}) {
   const chronoBooks = (seriesData && seriesData.books) || [];
   const releaseBooks = (seriesData && seriesData.releaseBooks) || chronoBooks;
   const files = Array.isArray(extraMeta.files) ? extraMeta.files : [];
+  const recBook = extraMeta.recommendedBook || undefined;
 
   const displayName = effAuthor
     ? `${cleanName} Series — ${effAuthor}`
@@ -502,7 +511,7 @@ async function fetchSeriesMeta(seriesName, author = "", extraMeta = {}) {
           name: book.title,
           author: book.author || effAuthor,
           parentInfohash: extraMeta.infohash || undefined,
-          targetFile: matchTargetFile(book, epNum, files),
+          targetFile: matchTargetFile(book, epNum, files, recBook),
           isSeries: true,
         }),
         title: `Book ${epNum}${yearLabel}: ${book.title}`,
@@ -525,7 +534,7 @@ async function fetchSeriesMeta(seriesName, author = "", extraMeta = {}) {
           name: book.title,
           author: book.author || effAuthor,
           parentInfohash: extraMeta.infohash || undefined,
-          targetFile: matchTargetFile(book, epNum, files),
+          targetFile: matchTargetFile(book, epNum, files, recBook),
           isSeries: true,
         }),
         title: `Book ${epNum}: ${book.title}`,
@@ -551,7 +560,7 @@ async function fetchSeriesMeta(seriesName, author = "", extraMeta = {}) {
           name: book.title,
           author: book.author || effAuthor,
           parentInfohash: extraMeta.infohash || undefined,
-          targetFile: matchTargetFile(book, epNum, files),
+          targetFile: matchTargetFile(book, epNum, files, recBook),
           isSeries: true,
         }),
         title: `Book ${epNum}: ${book.title}`,

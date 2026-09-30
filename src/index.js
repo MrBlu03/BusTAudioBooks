@@ -21,6 +21,7 @@ const { fetchSeriesMeta, fetchSeriesBooks, cleanSeriesQuery } = require("./serie
 const { getCatalogBooks, startCatalogRefresher } = require("./catalogs_meta");
 const torbox = require("./torbox");
 const nuvio = require("./nuvio");
+const audnexus = require("./audnexus");
 
 const app = express();
 const PORT = process.env.PORT || 7000;
@@ -561,25 +562,151 @@ async function handleCatalog(req, res, extraRaw) {
       }
     } catch (_) {}
   } else if (g && g.kind === genres.RECS) {
-    // Personal recommendations. Fully resolved by scripts/refresh-recs.js: each
-    // entry already carries the release to play, so this branch does no network
-    // work at all. That matters — resolving here meant firing one source request
-    // per book at once, which AudiobookBay answers with an empty page.
+    // Personal recommendations.
+    // User requirement: If a recommended book is from a series, default to showing the series container instead of only a single book.
     const list = getRecs(cfg);
     searchQuery = "";
     isRecsRow = true;
     if (!list.items.length) {
       console.warn("Recommendations requested but .recs.json has no playable entries — run scripts/refresh-recs.js");
+      return res.json({ metas: [] });
     }
-    items = list.items.map((rec) => {
-      const best = { ...rec.release, tracker: "AudiobookBay", seeders: 0 };
-      // Prefer the clean book title from the recommendation over the messy release name
-      best.name = rec.title || best.name;
-      if (rec.author) best.author = rec.author;
-      if (rec.poster) best.poster = rec.poster;
-      if (rec.reason) best.reason = rec.reason;
-      return best;
-    });
+
+    const recEntries = await Promise.all(
+      list.items.map(async (rec) => {
+        let seriesName = rec.series || null;
+        let seriesAuthor = rec.author || "";
+
+        // 1. Check release name or clean title via parseSeriesAndBook
+        if (!seriesName) {
+          const sInfo = parseSeriesAndBook(rec.release?.name || rec.title, rec.author);
+          if (sInfo && sInfo.seriesName) {
+            seriesName = sInfo.seriesName;
+            if (!seriesAuthor && sInfo.author) seriesAuthor = sInfo.author;
+          }
+        }
+
+        // 2. Check Audnexus metadata lookup (cached)
+        if (!seriesName) {
+          try {
+            const m = await audnexus.lookupAudnexus(rec.title, rec.author);
+            if (m && m.series) {
+              seriesName = m.series;
+              if (!seriesAuthor && m.author) seriesAuthor = m.author;
+            }
+          } catch (_) {}
+        }
+
+        let seriesCandidate = null;
+        if (seriesName) {
+          try {
+            seriesCandidate = await withTimeout(
+              fetchSeriesBooks(cleanSeriesQuery(seriesName), seriesAuthor),
+              4500,
+              null
+            );
+          } catch (_) {}
+        }
+
+        const isSeries = !!(
+          seriesCandidate &&
+          Array.isArray(seriesCandidate.books) &&
+          seriesCandidate.books.length >= 2
+        );
+
+        return {
+          rec,
+          isSeries,
+          seriesCandidate,
+          seriesAuthor,
+        };
+      })
+    );
+
+    const recCards = [];
+    const seenSeries = new Set();
+    const seenBooks = new Set();
+
+    for (const entry of recEntries) {
+      const { rec, isSeries, seriesCandidate, seriesAuthor } = entry;
+
+      if (isSeries) {
+        const sKey = seriesCandidate.seriesName.toLowerCase();
+        if (seenSeries.has(sKey)) continue; // Deduplicate so the same series is not shown multiple times in recs
+        seenSeries.add(sKey);
+
+        const sAuthor = seriesCandidate.author || seriesAuthor || rec.author || "";
+        const sPoster =
+          seriesCandidate.collectionPoster ||
+          (seriesCandidate.books[0] && seriesCandidate.books[0].poster) ||
+          rec.poster ||
+          undefined;
+
+        recCards.push({
+          id: encodeItemId({
+            type: "series",
+            isSeries: true,
+            seriesName: seriesCandidate.seriesName,
+            name: `${seriesCandidate.seriesName} Series`,
+            author: sAuthor,
+            recommendedBook: rec.title,
+            reason: rec.reason || undefined,
+            parentInfohash: rec.release?.infohash || undefined,
+            magnet: rec.release?.magnet || undefined,
+            torrentUrl: rec.release?.torrentUrl || undefined,
+            format: rec.release?.format || undefined,
+            bitrate: rec.release?.bitrate || undefined,
+            size: rec.release?.size || undefined,
+          }),
+          type: "series",
+          name: `${seriesCandidate.seriesName} Series${sAuthor ? ` — ${sAuthor}` : ""}`,
+          poster: sPoster,
+          posterShape: "square",
+          description:
+            detailLine([
+              rec.reason ? `💡 ${rec.reason}` : null,
+              `📚 Full Series (${seriesCandidate.books.length} Books in Reading Order)`,
+              sAuthor ? `By ${sAuthor}` : null,
+            ]) || `📚 Full Series (${seriesCandidate.books.length} Books in Reading Order)`,
+        });
+      } else {
+        // Standalone book recommendation (not from a series)
+        const bKey = getBookKey(rec.title, rec.author);
+        if (seenBooks.has(bKey)) continue;
+        seenBooks.add(bKey);
+
+        recCards.push({
+          id: encodeItemId({
+            name: rec.title,
+            author: rec.author || undefined,
+            reason: rec.reason || undefined,
+            infohash: rec.release?.infohash || undefined,
+            magnet: rec.release?.magnet || undefined,
+            torrentUrl: rec.release?.torrentUrl || undefined,
+            format: rec.release?.format || undefined,
+            bitrate: rec.release?.bitrate || undefined,
+            size: rec.release?.size || undefined,
+            type: req.params.type || "other",
+          }),
+          type: req.params.type || "other",
+          name: prettyName(rec.title),
+          poster: rec.poster || undefined,
+          posterShape: "square",
+          description:
+            detailLine([
+              rec.release?.infohash ? "⚡ Instant" : null,
+              rec.reason ? `💡 ${rec.reason}` : null,
+              rec.release?.format,
+              rec.release?.bitrate,
+              torbox.formatBytes(rec.release?.size),
+              rec.author,
+            ]) || "AudiobookBay",
+        });
+      }
+    }
+
+    const paged = recCards.slice(skip, skip + PAGE_SIZE);
+    return res.json({ metas: paged });
   } else {
     // Dynamic metadata-driven catalog fetching with scheduled regular refreshes.
     // Pulls clean studio bestsellers directly from Audible / Open Library.
@@ -778,9 +905,10 @@ async function handleMeta(req, res) {
     try {
       seriesMeta = await withTimeout(
         fetchSeriesMeta(detectedSeriesName, item.author || (meta && meta.author), {
-          infohash: item.infohash,
+          infohash: item.parentInfohash || item.infohash,
           poster: meta.poster,
           files,
+          recommendedBook: item.recommendedBook,
         }),
         4500,
         null
@@ -825,15 +953,15 @@ async function handleMeta(req, res) {
   ]);
 
   const descParts = [];
+  // The personal-recommendations row carries the model's "why this book". It is
+  // the only thing distinguishing these tiles from a normal search result, so
+  // it leads.
+  if (item.reason) descParts.push(item.reason);
   if (seriesMeta && seriesMeta.description) {
     descParts.push(seriesMeta.description);
   } else if (videos && videos.length > 1) {
     descParts.push(`📖 Series / Multi-Part Audio Collection (${videos.length} Episodes/Books)`);
   }
-  // The personal-recommendations row carries the model's "why this book". It is
-  // the only thing distinguishing these tiles from a normal search result, so
-  // it leads.
-  if (item.reason) descParts.push(item.reason);
   if (meta.author) descParts.push(`By ${meta.author}`);
   if (meta.narrator) descParts.push(`Narrated by ${meta.narrator}`);
   if (meta.series) descParts.push(`Series: ${meta.seriesIndex ? `${meta.series} #${meta.seriesIndex}` : meta.series}`);
@@ -881,7 +1009,7 @@ async function resolveForItem(cfg, item) {
   const type = typeOf(item.type);
 
   // If this item represents a series episode from a parent torrent pack, try parent torrent first
-  if (item.parentInfohash && !item.infohash) {
+  if (item.parentInfohash && !item.infohash && item.targetFile) {
     try {
       const parentResult = await resolveForItem(cfg, {
         ...item,

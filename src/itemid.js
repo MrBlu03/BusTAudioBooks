@@ -25,6 +25,7 @@ function encodeItemId(item) {
       // "Why we picked this" for the personal-recommendations row. Optional and
       // absent on every other id, so existing ids keep decoding unchanged.
       r: item.reason || undefined,
+      rb: item.recommendedBook || undefined,
     }),
     "utf8"
   ).toString("base64url");
@@ -53,6 +54,7 @@ function decodeItemId(id) {
       parentInfohash: obj.ph || null,
       targetFile: obj.tf || null,
       reason: obj.r || null,
+      recommendedBook: obj.rb || null,
     };
   } catch (_) {
     return null;
