@@ -6,7 +6,7 @@ try {
 
 const express = require("express");
 const crypto = require("crypto");
-const { manifest, buildManifest } = require("./manifest");
+const { manifest, buildManifest, CATALOG_ID_TO_GENRE } = require("./manifest");
 const genres = require("./genres");
 const { resolveGenre } = genres;
 const { getRecs, hasRecs } = require("./recs");
@@ -315,7 +315,9 @@ async function handleCatalog(req, res, extraRaw) {
 
   // Support both extra path segment AND query parameters (e.g. ?search=dune&skip=12)
   const query = String(req.query.search || extra.search || "").trim();
-  const genre = String(req.query.genre || extra.genre || "").trim();
+  const catalogId = req.params.id;
+  const mappedGenre = CATALOG_ID_TO_GENRE ? CATALOG_ID_TO_GENRE[catalogId] : null;
+  const genre = String(req.query.genre || extra.genre || mappedGenre || "").trim();
   const PAGE_SIZE = 12;
   const skip = parseInt(req.query.skip || extra.skip, 10) || 0;
 
@@ -589,6 +591,7 @@ async function handleMeta(req, res) {
   const runtime = formatRuntime(meta.duration);
 
   const facts = detailLine([
+    meta.rating ? `⭐ ${meta.rating}/5` : null,
     item.infohash
       ? (isCached ? "⚡ Instant on TorBox" : "Will download to TorBox on play")
       : "Adds to TorBox on play",
@@ -605,6 +608,7 @@ async function handleMeta(req, res) {
   if (item.reason) descParts.push(item.reason);
   if (meta.author) descParts.push(`By ${meta.author}`);
   if (meta.narrator) descParts.push(`Narrated by ${meta.narrator}`);
+  if (meta.series) descParts.push(`Series: ${meta.seriesIndex ? `${meta.series} #${meta.seriesIndex}` : meta.series}`);
   if (meta.description) descParts.push(meta.description);
   if (facts) descParts.push(facts);
   const description = descParts.filter(Boolean).join("\n\n");
@@ -616,7 +620,11 @@ async function handleMeta(req, res) {
     genres.push(meta.seriesIndex ? `${meta.series} #${meta.seriesIndex}` : meta.series);
   }
   genres.push("Audiobook");
-  if (Array.isArray(meta.genres)) genres.push(...meta.genres);
+  if (Array.isArray(meta.genres)) {
+    for (const g of meta.genres) {
+      if (typeof g === "string" && !genres.includes(g)) genres.push(g);
+    }
+  }
 
   res.json({
     meta: {

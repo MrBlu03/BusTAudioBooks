@@ -11,6 +11,7 @@
 const { TTLCache, withTimeout } = require("./cache");
 const { cleanDisplayTitle } = require("./series");
 const libex = require("./libex");
+const audnexus = require("./audnexus");
 
 const metaCache = new TTLCache(24 * 60 * 60 * 1000, 5000); // 24h
 
@@ -213,8 +214,19 @@ async function fromGoogleBooks(title, author) {
     const j = await res.json();
     const v = j.items && j.items[0] && j.items[0].volumeInfo;
     if (!v) return null;
-    let img = v.imageLinks && (v.imageLinks.thumbnail || v.imageLinks.smallThumbnail);
-    if (img) img = img.replace(/^http:/, "https:").replace(/&edge=curl/, "");
+    let img =
+      v.imageLinks &&
+      (v.imageLinks.extraLarge ||
+        v.imageLinks.large ||
+        v.imageLinks.medium ||
+        v.imageLinks.thumbnail ||
+        v.imageLinks.smallThumbnail);
+    if (img) {
+      img = img
+        .replace(/^http:/, "https:")
+        .replace(/&edge=curl/, "")
+        .replace(/&zoom=1/, "&zoom=2");
+    }
     const description = v.description
       ? decodeEntities(stripTags(v.description)).replace(/\s+/g, " ").trim()
       : null;
@@ -366,10 +378,11 @@ async function enrich(raw, type = "audiobook") {
       }
     } else {
       // Audiobook lookup: query providers concurrently.
-      // libex leads because it is the only one backed by Audible data — it
-      // yields real cover art, series ordering, narrator and runtime. The rest
-      // fill whatever it cannot supply.
-      const [lx, it, gb, ol, wiki] = await Promise.all([
+      // Audnexus (Audible API + Audnexus) leads as the gold standard used by Plex
+      // Audiobooks.bundle / Audiobookshelf. Libex serves as the primary Audible
+      // fallback, followed by iTunes, Google Books, Open Library, and Wikipedia.
+      const [an, lx, it, gb, ol, wiki] = await Promise.all([
+        withTimeout(audnexus.lookupAudnexus(title, author).catch(() => null), 3000, null),
         withTimeout(libex.lookup(title, author).catch(() => null), 2500, null),
         withTimeout(fromItunes(title, author, raw).catch(() => null), 2000, null),
         withTimeout(fromGoogleBooks(title, author).catch(() => null), 2000, null),
@@ -377,18 +390,21 @@ async function enrich(raw, type = "audiobook") {
         withTimeout(fromWikipedia(title, author).catch(() => null), 2000, null),
       ]);
 
-      const candidates = [lx, it, gb, ol, wiki].filter(Boolean);
+      const candidates = [an, lx, it, gb, ol, wiki].filter(Boolean);
       const poster =
+        (an && an.poster) ||
         (lx && lx.poster) ||
         (it && it.poster) ||
         (candidates.find((c) => c.poster) || {}).poster ||
         null;
       const authorFound =
+        (an && an.author) ||
         (lx && lx.author) ||
         (candidates.find((c) => c.author) || {}).author ||
         author ||
         null;
       const description =
+        (an && an.description) ||
         (lx && lx.description) ||
         (it && it.description) ||
         (ol && ol.description) ||
@@ -396,15 +412,15 @@ async function enrich(raw, type = "audiobook") {
         (wiki && wiki.description) ||
         null;
       const year =
+        (an && an.year) ||
         (lx && lx.year) ||
         (it && it.year) ||
         (ol && ol.year) ||
         (gb && gb.year) ||
         null;
-      // Prefer Libex genres/tags: they are Audible's own categories ("Business
-      // & Money", "Mystery, Thriller & Suspense") rather than Open Library's
-      // loose subject headings.
+      // Prefer Audnexus / Libex genres: they are official Audible categories
       const genres =
+        (an && an.genres && an.genres.length > 0 && an.genres) ||
         (lx && lx.genres && lx.genres.length > 0 && lx.genres) ||
         (ol && ol.genres && ol.genres.length > 0 && ol.genres) ||
         (gb && gb.genres && gb.genres.length > 0 && gb.genres) ||
@@ -412,20 +428,20 @@ async function enrich(raw, type = "audiobook") {
         [];
 
       result = {
+        title: (an && an.title) || title,
         poster,
         author: authorFound,
         description,
         year,
         genres,
-        // Only Libex supplies these; absent elsewhere, so consumers must treat
-        // them as optional.
-        narrator: (lx && lx.narrator) || null,
-        duration: (lx && lx.duration) || null,
-        series: (lx && lx.series) || null,
-        seriesIndex: (lx && lx.seriesIndex) || null,
+        narrator: (an && an.narrator) || (lx && lx.narrator) || null,
+        duration: (an && an.duration) || (lx && lx.duration) || null,
+        series: (an && an.series) || (lx && lx.series) || null,
+        seriesIndex: (an && an.seriesIndex) || (lx && lx.seriesIndex) || null,
         publisher: (lx && lx.publisher) || null,
-        asin: (lx && lx.asin) || null,
-        source: lx ? "libex" : "legacy",
+        asin: (an && an.asin) || (lx && lx.asin) || null,
+        rating: (an && an.rating) || null,
+        source: an ? "audnexus" : lx ? "libex" : "legacy",
       };
     }
   }

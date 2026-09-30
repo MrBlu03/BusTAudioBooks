@@ -4,6 +4,25 @@ const { GENRE_OPTIONS } = require("./genres");
 
 const ID_PREFIX = "tbab:"; // "TorBox AudioBook" — our custom stream/meta ids
 
+// Featured categories exposed as top-level catalogs so they appear as individual
+// horizontal scrolling rows directly on Stremio, Nuvio, and AIOMeta Home feeds.
+const FEATURED_HOME_ROWS = [
+  { id: "tbab-recs", name: "Audiobooks: Recommended For You", genre: "Recommended For You", recsOnly: true },
+  { id: "tbab-popular", name: "Audiobooks: Popular & Trending", genre: "Popular & Trending" },
+  { id: "tbab-torbox", name: "Audiobooks: In Your TorBox", genre: "In Your TorBox" },
+  { id: "tbab-series", name: "Audiobooks: Popular Series", genre: "Popular Series" },
+  { id: "tbab-scifi", name: "Audiobooks: Science Fiction", genre: "Science Fiction" },
+  { id: "tbab-fantasy", name: "Audiobooks: Fantasy & Magic", genre: "Fantasy & Magic" },
+  { id: "tbab-horror", name: "Audiobooks: Horror", genre: "Horror" },
+  { id: "tbab-mystery", name: "Audiobooks: Mystery & Detective", genre: "Mystery & Detective" },
+  { id: "tbab-thriller", name: "Audiobooks: Thriller & Suspense", genre: "Thriller & Suspense" },
+  { id: "tbab-history", name: "Audiobooks: History & Non-Fiction", genre: "History" },
+];
+
+const CATALOG_ID_TO_GENRE = Object.fromEntries(
+  FEATURED_HOME_ROWS.map((r) => [r.id, r.genre])
+);
+
 /**
  * Build the manifest.
  *
@@ -14,9 +33,47 @@ const ID_PREFIX = "tbab:"; // "TorBox AudioBook" — our custom stream/meta ids
  * refetch this, so it stays in step with src/genres.js.
  */
 function buildManifest({ withRecs = true } = {}) {
+  // Primary discover catalog: kept as catalogs[0] with full 45-genre dropdown
+  // and search, preserving 100% backward compatibility with tests and Discover.
+  const masterCatalog = {
+    type: "audiobook",
+    id: "torbox-audiobooks",
+    name: "Audiobooks",
+    extra: [
+      {
+        name: "genre",
+        options: withRecs ? GENRE_OPTIONS : GENRE_OPTIONS_WITHOUT_RECS,
+      },
+      { name: "search" },
+      { name: "skip" },
+    ],
+  };
+
+  // Top-level catalogs for the Home Feed / Board:
+  // Provided with dual-type compatibility ("other" and "audiobook") so Stremio's Board,
+  // AIOMeta, and Nuvio can load and display each category row on the home screen.
+  const homeCatalogs = [];
+  for (const row of FEATURED_HOME_ROWS) {
+    if (row.recsOnly && !withRecs) continue;
+    homeCatalogs.push(
+      {
+        type: "other",
+        id: row.id,
+        name: row.name,
+        extra: [{ name: "skip" }],
+      },
+      {
+        type: "audiobook",
+        id: row.id,
+        name: row.name,
+        extra: [{ name: "skip" }],
+      }
+    );
+  }
+
   return {
     id: "community.torbox.audiobooks",
-    version: "2.4.0",
+    version: "2.5.0",
     name: "BusTAudioBooks",
     description:
       "Search audiobooks and stream or download them through your TorBox account.",
@@ -24,25 +81,7 @@ function buildManifest({ withRecs = true } = {}) {
     // Only ids we mint get routed to this addon's meta/stream handlers.
     idPrefixes: [ID_PREFIX],
     resources: ["catalog", "meta", "stream"],
-    catalogs: [
-      {
-        type: "audiobook",
-        id: "torbox-audiobooks",
-        name: "Audiobooks",
-        extra: [
-          {
-            name: "genre",
-            // Populated from src/genres.js so the dropdown and the handler can
-            // never drift apart. Stremio renders this as a flat list, so the
-            // order there is the grouping: featured, fiction, non-fiction,
-            // kids & teens, franchises, authors.
-            options: withRecs ? GENRE_OPTIONS : GENRE_OPTIONS_WITHOUT_RECS,
-          },
-          { name: "search" },
-          { name: "skip" },
-        ],
-      },
-    ],
+    catalogs: [masterCatalog, ...homeCatalogs],
     behaviorHints: {
       configurable: true,
       configurationRequired: true,
@@ -56,4 +95,10 @@ const GENRE_OPTIONS_WITHOUT_RECS = GENRE_OPTIONS.filter((n) => n !== "Recommende
 // The plain object, for tests and anything that does not need a custom variant.
 const manifest = buildManifest();
 
-module.exports = { manifest, buildManifest, ID_PREFIX };
+module.exports = {
+  manifest,
+  buildManifest,
+  ID_PREFIX,
+  FEATURED_HOME_ROWS,
+  CATALOG_ID_TO_GENRE,
+};
