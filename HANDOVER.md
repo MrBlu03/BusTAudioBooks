@@ -1,5 +1,5 @@
 # BusTAudioBooks — Handover Brief
-Commit `9cddef2`, tree clean, nothing pushed. Freshly built image verified running in the container.
+Commit `af80740`, tree clean, nothing pushed. Freshly built image verified running in the container.
 
 ## 1. Standing constraints — do not break these
 - **No GitHub work.** `AFK-Goblin` is not the user's account. Commits stay local on `main`. Never push, create a repo, or install `gh`.
@@ -10,7 +10,7 @@ Commit `9cddef2`, tree clean, nothing pushed. Freshly built image verified runni
 ## 2. Verified state
 | Check | Result |
 | --- | --- |
-| `npm test` | 150 pass, 0 fail |
+| `npm test` | 153 pass, 0 fail |
 | `npm run test:serve` | all checks passed |
 | Manifest | v2.5.1, 45 genre options, recs advertised |
 | Recs resolution | 14 of 14 |
@@ -53,6 +53,7 @@ Genre rows sampled live: Horror / In Your TorBox / Popular Series / Science Fict
 - Nuvio credentials were pasted into chat; they live in gitignored `.env`. Rotation was recommended and needs confirming.
 
 ## 8. Commits (newest first)
+- `af80740` feat: implement dual chronological and release reading orders and daily recommendation refresh
 - `9cddef2` feat: implement dynamic metadata-driven catalogs with scheduled regular refreshes
 - `85602cf` feat: attach respective book covers to episodes and collection cover to series
 - `20c41bf` feat: prioritize book series in search results when query matches a book series
