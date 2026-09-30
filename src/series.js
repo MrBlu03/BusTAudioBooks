@@ -271,6 +271,15 @@ const KNOWN_SERIES = [
       },
     ],
   },
+  {
+    name: "the thrawn trilogy",
+    match: /\b(thrawn|heir to the empire|dark force rising|last command)\b/i,
+    books: [
+      { num: 1, match: /\bheir to the empire\b/i },
+      { num: 2, match: /\bdark force rising\b/i },
+      { num: 3, match: /\blast command\b/i },
+    ],
+  },
 ];
 
 function cleanTitleForParsing(raw) {
@@ -327,15 +336,16 @@ function parseSeriesAndBook(title, author = "", query = "") {
   // 1. Complete collection / box set / number ranges (e.g. 1-7, 1-5, Books 1-3)
   const rangeMatch = title.match(/\b0?([1-9]\d?)\s*[-–—to]+\s*0?([1-9]\d?)\b/);
   const isNumberRange = rangeMatch && parseInt(rangeMatch[1], 10) < parseInt(rangeMatch[2], 10);
-
-  const isCollection =
+  const hasSingleBookMarker = /\b(?:book|vol(?:ume)?|#)\s*0?[1-9]\b/i.test(title);
+  const isExplicitCollection =
     isNumberRange ||
     /\b(?:complete\s+(?:series|collection|audiobooks?|saga|trilogy|set)|all\s+\w+\s+books|whole\s+series|audio\s*books?\s*complete|audiobook\s+collection|box\s*set)\b/i.test(title) ||
     /\b(?:books?|vols?|volumes?|libros?|tom)\s*\d+\s*[-–—to]+\s*\d+\b/i.test(title) ||
     /\b\d+\s*[-–—to]+\s*\d+\s*(?:books?|vols?|volumes?|libros?)\b/i.test(title) ||
-    /(?:^|[\s\-_])trio?log(?:y|ia|ie|ía)\b/i.test(title) ||
     /\(\d+\s*[-–—]\s*\d+\)/.test(title) ||
     (/\b\d+\s*[-–—]\s*\d+\b/.test(title) && /\b(?:series|collection|saga|trilogy)\b/i.test(title));
+
+  const isCollection = !hasSingleBookMarker && (isExplicitCollection || /(?:^|[\s\-_])trio?log(?:y|ia|ie|ía)\b/i.test(title));
 
   // Check known series specific titles (books 2-10) BEFORE collection fallback so "Second Foundation Trilogy #3" -> Book 10
   for (const s of KNOWN_SERIES) {
@@ -348,21 +358,21 @@ function parseSeriesAndBook(title, author = "", query = "") {
     }
   }
 
+  // Check Book 1 of known series if single book marker present or not an explicit collection
+  for (const s of KNOWN_SERIES) {
+    if (s.match.test(lowerTitle) || (lowerQuery && s.match.test(lowerQuery))) {
+      const b1 = s.books.find((b) => b.num === 1);
+      if (b1 && b1.match.test(lowerTitle) && (!isExplicitCollection || hasSingleBookMarker)) {
+        return { seriesName: s.name, bookNumber: 1, isCollection: false };
+      }
+    }
+  }
+
   if (isCollection) {
     let collectionType = "collection";
     if (/(?:^|[\s\-_])trio?log(?:y|ia|ie|ía)\b/i.test(title)) collectionType = "trilogy";
     else if (isNumberRange) collectionType = `range-${rangeMatch[1]}-${rangeMatch[2]}`;
     return { seriesName: lowerQuery || "collection", bookNumber: 9999, collectionType, isCollection: true };
-  }
-
-  // Check Book 1 of known series
-  for (const s of KNOWN_SERIES) {
-    if (s.match.test(lowerTitle) || (lowerQuery && s.match.test(lowerQuery))) {
-      const b1 = s.books.find((b) => b.num === 1);
-      if (b1 && b1.match.test(lowerTitle)) {
-        return { seriesName: s.name, bookNumber: 1, isCollection: false };
-      }
-    }
   }
 
   // 3. Series prefix: e.g. "Beastborne, Book 7" -> if query was "dune", series is "Beastborne", not target

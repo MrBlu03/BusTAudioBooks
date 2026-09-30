@@ -397,6 +397,7 @@ const QUERY_REPLACEMENTS = [
   [/\bthewitcher\b/gi, "the witcher"],
   [/\bchroniclesofnarnia\b/gi, "chronicles of narnia"],
   [/\bstormlightarchive\b/gi, "stormlight archive"],
+  [/\bheir\s+to\s+the\s+empire\s+(?:trilogy|series|saga)\b/gi, "thrawn trilogy"],
 ];
 
 function normalizeSearchQuery(query) {
@@ -413,6 +414,11 @@ async function searchAudiobooks(config, query, page = 1) {
   const queriesToRun = [normQuery];
   if (query && query.trim() && query.trim().toLowerCase() !== normQuery.toLowerCase()) {
     queriesToRun.push(query.trim());
+  }
+
+  const stripped = String(query || "").replace(/\b(?:trilogy|series|saga|collection|chronicles|sequence)\b/gi, "").replace(/\s+/g, " ").trim();
+  if (stripped && stripped.length > 2 && !queriesToRun.some((x) => x.toLowerCase() === stripped.toLowerCase())) {
+    queriesToRun.push(stripped);
   }
 
   const allPromises = queriesToRun.flatMap((q) => [

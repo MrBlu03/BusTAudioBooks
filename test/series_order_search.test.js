@@ -163,3 +163,48 @@ test("sortInSeriesOrder places collections and series books ahead of standalones
   assert.equal(sorted[2].name, "Dune Messiah");
   assert.equal(sorted[3].name, "Stand Alone Spinoff");
 });
+
+test("Heir to the Empire Trilogy resolves canonical 3-book Thrawn Trilogy by Timothy Zahn", async () => {
+  const { fetchSeriesBooks, matchTargetFile } = require("../src/series_meta");
+  const { normalizeSearchQuery } = require("../src/sources");
+  const { parseSeriesAndBook } = require("../src/series");
+
+  // 1. Search normalization converts query to canonical franchise alias
+  assert.equal(normalizeSearchQuery("heir to the empire trilogy"), "thrawn trilogy");
+
+  // 2. Series resolution discovers canonical 3 books in order
+  const series = await fetchSeriesBooks("heir to the empire trilogy");
+  assert.ok(series, "Series must be resolved");
+  assert.ok(/thrawn/i.test(series.seriesName), "Must resolve to Thrawn Trilogy");
+  assert.equal(series.author, "Timothy Zahn");
+  assert.equal(series.books.length, 3, "Must resolve exactly the 3 canonical books of the trilogy");
+  assert.ok(/heir to the empire/i.test(series.books[0].title));
+  assert.ok(/dark force rising/i.test(series.books[1].title));
+  assert.ok(/last command/i.test(series.books[2].title));
+
+  // 3. parseSeriesAndBook handles titles with 'The Thrawn Trilogy, Book 1' without false collection flag
+  const b1 = parseSeriesAndBook("Star Wars: Heir to the Empire (20th Anniversary Edition), The Thrawn Trilogy, Book 1 - Timothy Zahn [MP3] [64 Kbps]");
+  assert.equal(b1.bookNumber, 1);
+  assert.equal(b1.isCollection, false);
+
+  const b2 = parseSeriesAndBook("Star Wars Dark Force Rising - Unabridged narrated by Marc Thomps");
+  assert.equal(b2.bookNumber, 2);
+
+  const b3 = parseSeriesAndBook("The Last Command (Star Wars: The Thrawn Trilogy 3) - Timothy Zahn [MP3] [256 Kbps]");
+  assert.equal(b3.bookNumber, 3);
+
+  const colPack = parseSeriesAndBook("The Thrawn Trilogy - Timothy Zahn [M4B] [64 Kbps]");
+  assert.equal(colPack.bookNumber, 9999);
+  assert.equal(colPack.isCollection, true);
+
+  // 4. matchTargetFile matches files accurately from a 3-book torrent pack
+  const thrawnFiles = [
+    { name: "Star Wars - The Thrawn Trilogy 01 - Heir to the Empire.m4b" },
+    { name: "Star Wars - The Thrawn Trilogy 02 - Dark Force Rising.m4b" },
+    { name: "Star Wars - The Thrawn Trilogy 03 - The Last Command.m4b" },
+  ];
+
+  assert.equal(matchTargetFile({ name: series.books[0].title, seq: 1 }, 1, thrawnFiles), thrawnFiles[0].name);
+  assert.equal(matchTargetFile({ name: series.books[1].title, seq: 2 }, 2, thrawnFiles), thrawnFiles[1].name);
+  assert.equal(matchTargetFile({ name: series.books[2].title, seq: 3 }, 3, thrawnFiles), thrawnFiles[2].name);
+});

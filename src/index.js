@@ -823,20 +823,23 @@ async function handleCatalog(req, res, extraRaw) {
             undefined;
 
           const sNameLower = seriesCandidate.seriesName.toLowerCase();
+          const cleanSName = cleanSeriesQuery(seriesCandidate.seriesName).toLowerCase();
           const colPacks = expandedItems.filter((r) => {
             const parsed = r.seriesInfo || parseSeriesAndBook(r.name, r.author, query);
-            return (
-              parsed &&
-              (parsed.isCollection || r.isSeries) &&
-              (r.name.toLowerCase().includes(sNameLower) ||
-                (parsed.seriesName && parsed.seriesName.toLowerCase().includes(sNameLower)))
-            );
+            const rNameLower = (r.name || "").toLowerCase();
+            const pNameLower = (parsed && parsed.seriesName) ? parsed.seriesName.toLowerCase() : "";
+            const matchesSeries =
+              rNameLower.includes(sNameLower) ||
+              sNameLower.includes(rNameLower) ||
+              (cleanSName && (rNameLower.includes(cleanSName) || cleanSName.includes(rNameLower))) ||
+              (pNameLower && (pNameLower.includes(sNameLower) || sNameLower.includes(pNameLower) || pNameLower.includes(cleanSName) || cleanSName.includes(pNameLower)));
+            return parsed && (parsed.isCollection || r.isSeries) && matchesSeries;
           });
           const colPack =
             colPacks.find((r) => r.cached) ||
             colPacks[0] ||
-            expandedItems.find((r) => r.cached && r.infohash && r.name.toLowerCase().includes(sNameLower)) ||
-            expandedItems.find((r) => r.infohash && r.name.toLowerCase().includes(sNameLower));
+            expandedItems.find((r) => r.cached && r.infohash && (r.name.toLowerCase().includes(sNameLower) || (cleanSName && r.name.toLowerCase().includes(cleanSName)))) ||
+            expandedItems.find((r) => r.infohash && (r.name.toLowerCase().includes(sNameLower) || (cleanSName && r.name.toLowerCase().includes(cleanSName))));
 
           seriesCard = {
             id: encodeItemId({
@@ -1113,10 +1116,16 @@ async function resolveForItem(cfg, item) {
 
   // If this item represents a metadata catalog book or series episode without an infohash/magnet/torrentUrl, dynamically search and resolve the best torrent
   if (!item.infohash && !item.magnet && !item.torrentUrl && item.name) {
-    const bookTitle = cleanDisplayTitle(item.name || "");
-    const bookQuery = `${bookTitle} ${item.author || ""}`.trim();
+    const rawName = cleanDisplayTitle(item.name || "").replace(/[:\-–—]/g, " ").replace(/\s+/g, " ").trim();
+    const coreTitle = rawName.replace(/^(?:Star\s*Wars\s*|The\s+)/i, "").trim();
     try {
-      const searchResults = await withTimeout(searchAudiobooks(cfg, bookQuery, 1), 3500, []);
+      let searchResults = await withTimeout(searchAudiobooks(cfg, rawName, 1), 3500, []);
+      if ((!searchResults || searchResults.length === 0) && coreTitle && coreTitle !== rawName) {
+        searchResults = await withTimeout(searchAudiobooks(cfg, coreTitle, 1), 3500, []);
+      }
+      if ((!searchResults || searchResults.length === 0) && item.author) {
+        searchResults = await withTimeout(searchAudiobooks(cfg, `${coreTitle || rawName} ${item.author}`, 1), 3500, []);
+      }
       if (Array.isArray(searchResults) && searchResults.length > 0) {
         const hashes = searchResults.map((r) => r.infohash).filter(Boolean);
         let cachedSet = new Set();

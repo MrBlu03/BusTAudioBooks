@@ -24,13 +24,17 @@ function cleanSeriesQuery(name) {
 }
 
 function cleanBookTitle(raw) {
-  return cleanDisplayTitle(raw)
+  let s = cleanDisplayTitle(raw)
     .replace(/\s*[\(\[](?:Full-Cast|Dramatized|GraphicAudio|Special|Audible|Narrated|Collector's).*?[\)\]]/gi, "")
     .replace(/:\s*(?:unabridged|abridged|a novel|dramatized|full-cast).*$/i, "")
     .replace(/\s*\((?:un)?abridged\)/gi, "")
-    .replace(/\s*,\s*Book\s*\d+/i, "")
-    .replace(/\s*\(Book\s*\d+\)/i, "")
-    .trim();
+    .replace(/\s*\([^)]*(?:Series|Trilogy|Saga)[^)]*\)/gi, "");
+  s = s.replace(/^.*?,\s*Book\s*\d+\s*:\s*/i, "");
+  s = s.replace(/:\s*[^:]{3,40}\s*(?:Series|Trilogy|Saga|Collection|Chronicles|Sequence)\s*:\s*/i, ": ");
+  s = s.replace(/:\s*[^:]{3,40},\s*Book\s*\d+.*$/i, "");
+  s = s.replace(/\s*,\s*Book\s*\d+/i, "");
+  s = s.replace(/\s*\(Book\s*\d+\)/i, "");
+  return s.trim();
 }
 
 async function queryAudibleCatalog(qStr, numResults = "50") {
@@ -111,7 +115,10 @@ function extractAudibleCandidates(products, normTarget, normAuthor, seriesName, 
       seriesList.find((s) => norm(s.title) === normTarget) ||
       seriesList.find((s) => {
         const st = norm(s.title);
-        return st && normTarget && (st === normTarget || st.startsWith(normTarget) || normTarget.startsWith(st) || st.includes(normTarget) || normTarget.includes(st));
+        if (!st || !normTarget) return false;
+        if (st === normTarget || st.startsWith(normTarget)) return true;
+        if (normTarget.startsWith(st) && st.length / normTarget.length >= 0.75) return true;
+        return false;
       });
 
     if (!matchedSeries && !pubSeries && !chronoSeries) continue;
@@ -183,6 +190,37 @@ async function fetchSeriesFromAudible(seriesName, author = "") {
 
   let candidates = extractAudibleCandidates(products, normTarget, normAuthor, seriesName, author);
 
+  // If query was a book title that belongs to a series (e.g. "Heir to the Empire" in "The Thrawn Trilogy"),
+  // detect the canonical series title from the returned product's series list and fetch the full series.
+  if (!candidates.length) {
+    let detectedSeries = null;
+    let detectedAuthor = null;
+    for (const p of products) {
+      if (Array.isArray(p.series) && p.series.length > 0) {
+        const sMatch =
+          p.series.find((s) => s.title && !/abridged/i.test(s.title) && (s.sequence === "1" || s.sequence === 1)) ||
+          p.series.find((s) => s.title && !/abridged/i.test(s.title) && s.sequence);
+        if (sMatch) {
+          detectedSeries = sMatch.title.replace(/\s*-\s*Legends\b/i, "").trim();
+          detectedAuthor = (p.authors && p.authors[0] && p.authors[0].name) || author;
+          break;
+        }
+      }
+    }
+    if (detectedSeries) {
+      const extraProducts = await queryAudibleCatalog(detectedSeries, "50");
+      if (extraProducts.length > 0) {
+        candidates = extractAudibleCandidates(
+          extraProducts,
+          norm(detectedSeries),
+          norm(detectedAuthor || author),
+          detectedSeries,
+          detectedAuthor || author
+        );
+      }
+    }
+  }
+
   // If few books found but a canonical series title was detected (e.g. "Percy Jackson and the Olympians" for query "Percy Jackson"),
   // query Audible with the detected canonical title to retrieve all books in the series.
   const canonicalCandidate = candidates.find(
@@ -224,7 +262,13 @@ async function fetchSeriesFromAudible(seriesName, author = "") {
   // Deduplicate by clean book title: prefer standard full edition over dramatized/parts, and prefer entries with poster
   const byTitle = new Map();
   for (const c of candidates) {
-    const key = c.title.toLowerCase().replace(/’/g, "'").replace(/[^a-z0-9]/g, "");
+    const key = c.title
+      .toLowerCase()
+      .replace(/’/g, "'")
+      .replace(/^(?:star\s*wars\s*[:\-–—]?\s*)*/i, "")
+      .replace(/^(?:the|a|an)\s+/i, "")
+      .replace(/[:\-–—]\s*star\s*wars$/i, "")
+      .replace(/[^a-z0-9]/g, "");
     if (!key) continue;
     const existing = byTitle.get(key);
     if (!existing) {
@@ -671,7 +715,7 @@ async function fetchSeriesBooks(seriesName, author = "") {
 
 function matchTargetFile(book, bookNum, files, recommendedBook, allBooks = []) {
   if (!Array.isArray(files) || files.length === 0) return undefined;
-  const targetTitle = typeof book === "string" ? book : (book && book.title) || "";
+  const targetTitle = typeof book === "string" ? book : ((book && (book.title || book.name)) || "");
   const cleanTarget = cleanDisplayTitle(targetTitle).toLowerCase().replace(/[^a-z0-9]/g, "");
   if (!cleanTarget) return undefined;
 
