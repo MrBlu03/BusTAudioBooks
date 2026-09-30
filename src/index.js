@@ -17,6 +17,7 @@ const { encodeItemId, decodeItemId } = require("./itemid");
 const { TTLCache, pLimit, withTimeout } = require("./cache");
 const { makeAccess } = require("./access");
 const { getBookKey, sortInSeriesOrder, parseSeriesAndBook, cleanDisplayTitle, cleanEpisodeTitle, expandSeriesPacks } = require("./series");
+const { fetchSeriesMeta } = require("./series_meta");
 const torbox = require("./torbox");
 const nuvio = require("./nuvio");
 
@@ -630,8 +631,14 @@ async function handleCatalog(req, res, extraRaw) {
   const metas = paged.map((r) => {
     const sInfo = parseSeriesAndBook(r.name, r.author, searchQuery);
     const isSeries = !!(sInfo && sInfo.isCollection);
+    const itemData = {
+      ...r,
+      isSeries,
+      type: isSeries ? "series" : (req.params.type || "other"),
+      seriesName: (sInfo && sInfo.seriesName) || undefined,
+    };
     return {
-      id: encodeItemId(r),
+      id: encodeItemId(itemData),
       type: isSeries ? "series" : (req.params.type || "other"),
       name: prettyName(r.name),
       poster: r.poster || undefined,
@@ -678,11 +685,32 @@ async function handleMeta(req, res) {
   // "[128 kbps]" tag scraped out of the release filename.
   const runtime = formatRuntime(meta.duration);
 
-  // If the torrent contains multiple audio files, dynamically generate sequential episodes
+  const sInfo = parseSeriesAndBook(item.name, item.author || (meta && meta.author));
+  const isSeries = req.params.type === "series" || item.isSeries || !!(sInfo && sInfo.isCollection) || (Array.isArray(files) && files.length > 1);
+  const detectedSeriesName = item.seriesName || (meta && meta.series) || (sInfo && sInfo.seriesName) || null;
+
   let videos = undefined;
-  let isSeries = req.params.type === "series";
-  if (Array.isArray(files) && files.length > 1) {
-    isSeries = true;
+  let seriesMeta = null;
+
+  if (isSeries && detectedSeriesName) {
+    try {
+      seriesMeta = await withTimeout(
+        fetchSeriesMeta(detectedSeriesName, item.author || (meta && meta.author), {
+          infohash: item.infohash,
+          poster: meta.poster,
+          files,
+        }),
+        4500,
+        null
+      );
+      if (seriesMeta && Array.isArray(seriesMeta.videos) && seriesMeta.videos.length > 0) {
+        videos = seriesMeta.videos;
+      }
+    } catch (_) {}
+  }
+
+  // Fallback: If not fetched via metadata series, but torrent has multiple audio files, use file episodes
+  if (!videos && Array.isArray(files) && files.length > 1) {
     videos = files.map((file, idx) => {
       const epNum = idx + 1;
       const fName = file.name || file.short_name || `Episode ${epNum}`;
@@ -715,7 +743,9 @@ async function handleMeta(req, res) {
   ]);
 
   const descParts = [];
-  if (videos && videos.length > 1) {
+  if (seriesMeta && seriesMeta.description) {
+    descParts.push(seriesMeta.description);
+  } else if (videos && videos.length > 1) {
     descParts.push(`📖 Series / Multi-Part Audio Collection (${videos.length} Episodes/Books)`);
   }
   // The personal-recommendations row carries the model's "why this book". It is
@@ -746,13 +776,13 @@ async function handleMeta(req, res) {
     meta: {
       id: req.params.id,
       type: isSeries ? "series" : (req.params.type || "audiobook"),
-      name: prettyName(item.name) || "Audiobook",
-      poster: meta.poster || undefined,
-      background: meta.poster || undefined,
+      name: (seriesMeta && seriesMeta.name) || prettyName(item.name) || "Audiobook",
+      poster: (seriesMeta && seriesMeta.poster) || meta.poster || undefined,
+      background: (seriesMeta && seriesMeta.background) || meta.poster || undefined,
       posterShape: "square",
       description,
-      releaseInfo: meta.year || undefined,
-      genres,
+      releaseInfo: (seriesMeta && seriesMeta.releaseInfo) || meta.year || undefined,
+      genres: seriesMeta && Array.isArray(seriesMeta.genres) ? [...new Set([...seriesMeta.genres, ...genres])] : genres,
       // Stremio has no narrator field; `director` is the closest slot, and it
       // is what most audio addons abuse for this. `cast` keeps the author.
       director: meta.narrator ? [meta.narrator] : undefined,
@@ -765,10 +795,56 @@ app.get("/meta/:type/:id.json", handleMeta);
 app.get("/:config/meta/:type/:id.json", handleMeta);
 
 // ---- Shared stream resolution (Stremio + app) -------------------------------
-// Returns { ready, status, streams } where streams are raw {title,url,filename,
-// behaviorHints}. Cached per (apiKey, item) so re-opens don't re-hit TorBox.
 async function resolveForItem(cfg, item) {
   const type = typeOf(item.type);
+
+  // If this item represents a series episode from a parent torrent pack, try parent torrent first
+  if (item.parentInfohash && !item.infohash) {
+    try {
+      const parentResult = await resolveForItem(cfg, {
+        ...item,
+        infohash: item.parentInfohash,
+        parentInfohash: undefined,
+      });
+      if (parentResult && parentResult.ready && Array.isArray(parentResult.streams) && parentResult.streams.length > 0) {
+        return parentResult;
+      }
+    } catch (_) {}
+  }
+
+  // If this item represents a series episode without an infohash, dynamically search and resolve the best torrent
+  if (!item.infohash && (item.seriesName || item.bookNumber != null || item.isSeries)) {
+    const bookTitle = cleanDisplayTitle(item.name || "");
+    const bookQuery = `${bookTitle} ${item.author || ""}`.trim();
+    try {
+      const searchResults = await searchAudiobooks(cfg, bookQuery, 1);
+      if (Array.isArray(searchResults) && searchResults.length > 0) {
+        const hashes = searchResults.map((r) => r.infohash).filter(Boolean);
+        let cachedSet = new Set();
+        try {
+          if (hashes.length) cachedSet = await torbox.checkCachedMany(cfg.apiKey, hashes);
+        } catch (_) {}
+
+        searchResults.sort((a, b) => {
+          const ca = a.infohash && cachedSet.has(a.infohash) ? 1 : 0;
+          const cb = b.infohash && cachedSet.has(b.infohash) ? 1 : 0;
+          if (ca !== cb) return cb - ca;
+          const qa = qualityScore(a);
+          const qb = qualityScore(b);
+          if (qa !== qb) return qb - qa;
+          return (b.seeders || 0) - (a.seeders || 0);
+        });
+
+        const best = searchResults[0];
+        if (best) {
+          return await resolveForItem(cfg, { ...best, targetFile: item.targetFile });
+        }
+      }
+    } catch (err) {
+      console.error("dynamic episode resolution error:", err.message);
+    }
+  }
+
   const key = streamKey(cfg.apiKey, type, item.infohash || item.torrentUrl || item.name);
   const cachedStreams = streamCache.get(key);
   if (cachedStreams) return { ready: true, status: "ok", streams: cachedStreams };

@@ -15,8 +15,13 @@ function encodeItemId(item) {
       s: item.size || undefined,
       // Content-type discriminator. Absent = audiobook, so ids minted before
       // comics existed keep decoding exactly as they always did.
-      t: item.type === "comic" ? "c" : undefined,
+      t: item.type === "comic" ? "c" : (item.type === "series" || item.isSeries ? "s" : undefined),
       tf: item.targetFile || undefined,
+      sn: item.seriesName || undefined,
+      bn: item.bookNumber != null ? item.bookNumber : undefined,
+      a: item.author || undefined,
+      is: item.isSeries ? 1 : undefined,
+      ph: item.parentInfohash || undefined,
       // "Why we picked this" for the personal-recommendations row. Optional and
       // absent on every other id, so existing ids keep decoding unchanged.
       r: item.reason || undefined,
@@ -40,7 +45,12 @@ function decodeItemId(id) {
       format: obj.f,
       bitrate: obj.b,
       size: obj.s,
-      type: obj.t === "c" ? "comic" : "audiobook",
+      type: obj.is || obj.t === "s" ? "series" : obj.t === "c" ? "comic" : "audiobook",
+      isSeries: !!(obj.is || obj.t === "s"),
+      seriesName: obj.sn || null,
+      bookNumber: obj.bn != null ? obj.bn : null,
+      author: obj.a || null,
+      parentInfohash: obj.ph || null,
       targetFile: obj.tf || null,
       reason: obj.r || null,
     };
