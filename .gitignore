@@ -1,7 +1,14 @@
 node_modules/
 npm-debug.log*
-.env
+*.log
 .DS_Store
+Thumbs.db
+
+# Environment variables & secrets (keep .env.example tracked)
+.env
+.env.*
+.env*.local
+!.env.example
 
 # Jackett runtime state — mounted into the container at /config.
 # ServerConfig.json holds a live API key, DataProtection/ holds signing keys,
@@ -11,7 +18,12 @@ selfhost/jackett-config/
 
 # Nuvio OAuth tokens (access + rotating refresh). Written by src/nuvio.js.
 .nuvio-auth.json
+*.auth.json
 
 # Generated recommendations cache. Rebuildable; do not commit.
 .recs.json
 .recs-state.json
+
+# Editor & IDE configs
+.vscode/
+.idea/
