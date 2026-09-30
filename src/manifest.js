@@ -34,9 +34,9 @@ const CATALOG_ID_TO_GENRE = Object.fromEntries(
  */
 function buildManifest({ withRecs = true } = {}) {
   // Primary discover catalog: kept as catalogs[0] with full 45-genre dropdown
-  // and search, preserving 100% backward compatibility with tests and Discover.
+  // and search, placed under "other" segment to unify all catalogs cleanly.
   const masterCatalog = {
-    type: "audiobook",
+    type: "other",
     id: "torbox-audiobooks",
     name: "Audiobooks",
     extra: [
@@ -50,34 +50,26 @@ function buildManifest({ withRecs = true } = {}) {
   };
 
   // Top-level catalogs for the Home Feed / Board:
-  // Provided with dual-type compatibility ("other" and "audiobook") so Stremio's Board,
-  // AIOMeta, and Nuvio can load and display each category row on the home screen.
+  // Placed strictly under "other" so Nuvio and Stremio display each row without
+  // duplicating rows across multiple segments.
   const homeCatalogs = [];
   for (const row of FEATURED_HOME_ROWS) {
     if (row.recsOnly && !withRecs) continue;
-    homeCatalogs.push(
-      {
-        type: "other",
-        id: row.id,
-        name: row.name,
-        extra: [{ name: "skip" }],
-      },
-      {
-        type: "audiobook",
-        id: row.id,
-        name: row.name,
-        extra: [{ name: "skip" }],
-      }
-    );
+    homeCatalogs.push({
+      type: "other",
+      id: row.id,
+      name: row.name,
+      extra: [{ name: "skip" }],
+    });
   }
 
   return {
     id: "community.torbox.audiobooks",
-    version: "2.5.0",
+    version: "2.5.1",
     name: "BusTAudioBooks",
     description:
       "Search audiobooks and stream or download them through your TorBox account.",
-    types: ["audiobook", "other"],
+    types: ["other", "audiobook"],
     // Only ids we mint get routed to this addon's meta/stream handlers.
     idPrefixes: [ID_PREFIX],
     resources: ["catalog", "meta", "stream"],

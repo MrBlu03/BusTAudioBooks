@@ -117,3 +117,74 @@ test("isConfigured() is false without credentials and never throws", () => {
     if (hadPassword !== undefined) process.env.NUVIO_PASSWORD = hadPassword;
   }
 });
+
+test("decodeTbabId recovers JSON metadata from tbab: content_id", () => {
+  const sample = {
+    n: "Foundation (Book 1) - Isaac Asimov",
+    f: "M4B",
+    b: "128 kbps",
+    s: 518191005,
+    tf: "Foundation.m4b",
+  };
+  const encoded = "tbab:" + Buffer.from(JSON.stringify(sample)).toString("base64url");
+  const decoded = nuvio.decodeTbabId(encoded);
+  assert.deepEqual(decoded, sample);
+  assert.equal(nuvio.decodeTbabId("invalid"), null);
+  assert.equal(nuvio.decodeTbabId(null), null);
+});
+
+test("getCredentials reads per-user config over environment variables", () => {
+  const hadEmail = process.env.NUVIO_EMAIL;
+  const hadPassword = process.env.NUVIO_PASSWORD;
+  process.env.NUVIO_EMAIL = "env@test.com";
+  process.env.NUVIO_PASSWORD = "envpassword";
+  try {
+    const userCfg = {
+      nuvio: { email: "user@test.com", password: "userpassword" },
+    };
+    const creds = nuvio.getCredentials(userCfg);
+    assert.equal(creds.email, "user@test.com");
+    assert.equal(creds.password, "userpassword");
+
+    const flatCfg = {
+      nuvioEmail: "flat@test.com",
+      nuvioPassword: "flatpassword",
+    };
+    const flatCreds = nuvio.getCredentials(flatCfg);
+    assert.equal(flatCreds.email, "flat@test.com");
+    assert.equal(flatCreds.password, "flatpassword");
+
+    const envCreds = nuvio.getCredentials();
+    assert.equal(envCreds.email, "env@test.com");
+  } finally {
+    if (hadEmail !== undefined) process.env.NUVIO_EMAIL = hadEmail;
+    else delete process.env.NUVIO_EMAIL;
+    if (hadPassword !== undefined) process.env.NUVIO_PASSWORD = hadPassword;
+    else delete process.env.NUVIO_PASSWORD;
+  }
+});
+
+test("hashActivityFingerprint changes on watch progress or library changes", () => {
+  const lib = ["tbab:item1", "tbab:item2"];
+  const watch = [
+    { contentId: "tbab:item1", progressPercent: 28, lastWatched: 1000 },
+  ];
+  const fp1 = nuvio.hashActivityFingerprint(lib, watch);
+
+  // Unchanged watch progress -> stable
+  const fpSame = nuvio.hashActivityFingerprint(lib, [
+    { contentId: "tbab:item1", progressPercent: 28, lastWatched: 1000 },
+  ]);
+  assert.equal(fp1, fpSame);
+
+  // Updated watch progress -> invalidates
+  const fpProgress = nuvio.hashActivityFingerprint(lib, [
+    { contentId: "tbab:item1", progressPercent: 50, lastWatched: 2000 },
+  ]);
+  assert.notEqual(fp1, fpProgress);
+
+  // New book added -> invalidates
+  const fpAdded = nuvio.hashActivityFingerprint([...lib, "tbab:item3"], watch);
+  assert.notEqual(fp1, fpAdded);
+});
+

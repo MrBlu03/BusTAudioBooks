@@ -4,7 +4,7 @@
 const test = require("node:test");
 const assert = require("node:assert");
 
-const { cleanTitleForSearch } = require("../src/audnexus");
+const { cleanTitleForSearch, cleanAudiblePoster, cleanSynopsis } = require("../src/audnexus");
 const { buildManifest, FEATURED_HOME_ROWS, CATALOG_ID_TO_GENRE } = require("../src/manifest");
 
 test("cleanTitleForSearch removes tags, series numbers, and brackets", () => {
@@ -22,25 +22,53 @@ test("cleanTitleForSearch removes tags, series numbers, and brackets", () => {
   );
 });
 
-test("manifest provides top-level home feed catalogs with other and audiobook types", () => {
+test("cleanAudiblePoster upscales Amazon/Audible artwork to studio resolution", () => {
+  assert.equal(
+    cleanAudiblePoster("https://m.media-amazon.com/images/I/71-1WBgjGoL._SL500_.jpg"),
+    "https://m.media-amazon.com/images/I/71-1WBgjGoL.jpg"
+  );
+  assert.equal(
+    cleanAudiblePoster("http://images-na.ssl-images-amazon.com/images/I/51abcXYZ._SX300_.png"),
+    "https://images-na.ssl-images-amazon.com/images/I/51abcXYZ.png"
+  );
+  assert.equal(cleanAudiblePoster(null), null);
+});
+
+test("cleanSynopsis strips HTML tags and Audible copyright disclaimers", () => {
+  const dirty = "<p>A sweeping galactic epic.</p> ©2021 Frank Herbert (P)2021 Macmillan Audio";
+  assert.equal(cleanSynopsis(dirty), "A sweeping galactic epic.");
+});
+
+test("manifest provides top-level home feed catalogs strictly under other with no duplicates", () => {
   const man = buildManifest({ withRecs: true });
-  assert.equal(man.version, "2.5.0");
+  assert.equal(man.version, "2.5.1");
   assert.ok(man.types.includes("other") && man.types.includes("audiobook"));
 
-  // First catalog is master discover catalog
+  // First catalog is master discover catalog under "other"
   assert.equal(man.catalogs[0].id, "torbox-audiobooks");
+  assert.equal(man.catalogs[0].type, "other");
 
-  // Subsequent catalogs are top-level home rows
+  // Subsequent catalogs are top-level home rows under "other"
   const homeCats = man.catalogs.slice(1);
   assert.ok(homeCats.length >= 10, "should have multiple home feed catalogs");
 
-  const recsCat = homeCats.find((c) => c.id === "tbab-recs" && c.type === "other");
+  // Every catalog must strictly be type "other" to avoid duplicate rows in Nuvio
+  for (const c of man.catalogs) {
+    assert.equal(c.type, "other", `catalog ${c.id} must have type other`);
+  }
+
+  // Ensure NO duplicate catalog IDs exist
+  const ids = man.catalogs.map((c) => c.id);
+  const uniqueIds = new Set(ids);
+  assert.equal(ids.length, uniqueIds.size, "manifest must not have duplicate catalog entries");
+
+  const recsCat = homeCats.find((c) => c.id === "tbab-recs");
   assert.ok(recsCat, "tbab-recs must exist for home feed");
 
-  const popularCat = homeCats.find((c) => c.id === "tbab-popular" && c.type === "other");
+  const popularCat = homeCats.find((c) => c.id === "tbab-popular");
   assert.ok(popularCat, "tbab-popular must exist for home feed");
 
-  const scifiCat = homeCats.find((c) => c.id === "tbab-scifi" && c.type === "other");
+  const scifiCat = homeCats.find((c) => c.id === "tbab-scifi");
   assert.ok(scifiCat, "tbab-scifi must exist for home feed");
 });
 

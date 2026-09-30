@@ -77,6 +77,31 @@ async function fetchAudnexusByAsin(asin) {
   return await res.json();
 }
 
+// Clean and upscale Audible/Amazon artwork to uncompressed studio master resolution
+function cleanAudiblePoster(url) {
+  if (!url) return null;
+  let clean = String(url).replace(/^http:/, "https:");
+  if (/(?:media-amazon|ssl-images-amazon|audible)\.com/i.test(clean)) {
+    // Strip downscaling modifiers like ._SL500_ or ._SX300_ to load full uncompressed studio art
+    clean = clean.replace(/\._S[LXYZ]\d+.*?\.(jpg|jpeg|png)$/i, (m, ext) => "." + ext);
+  }
+  return clean;
+}
+
+// Clean HTML tags and trailing Audible copyright/disclaimer lines from plot summaries
+function cleanSynopsis(raw) {
+  if (!raw) return null;
+  return String(raw)
+    .replace(/<[^>]*>/g, "")
+    .replace(/&amp;/g, "&")
+    .replace(/&#0?39;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/©\d{4}.*$/i, "")
+    .replace(/\(P\)\d{4}.*$/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 /**
  * Lookup audiobook metadata via Audnexus / Audible pipeline.
  *
@@ -100,7 +125,7 @@ async function lookupAudnexus(title, author) {
       if (!data) return null;
 
       // Extract high-res master art (often 2400x2400 Amazon studio file)
-      const poster = data.image || null;
+      const poster = cleanAudiblePoster(data.image) || null;
 
       // Extract author string
       const authorFound = Array.isArray(data.authors) && data.authors.length > 0
@@ -118,7 +143,7 @@ async function lookupAudnexus(title, author) {
       const seriesIndex = s ? s.position : null;
 
       // Extract description
-      const description = data.description || data.summary || null;
+      const description = cleanSynopsis(data.description || data.summary) || null;
 
       // Extract year
       const year = data.releaseDate ? String(data.releaseDate).slice(0, 4) : null;
@@ -136,6 +161,7 @@ async function lookupAudnexus(title, author) {
 
       return {
         title: data.title || title,
+        subtitle: data.subtitle ? cleanSynopsis(data.subtitle) : null,
         poster,
         author: authorFound,
         narrator,
@@ -152,7 +178,7 @@ async function lookupAudnexus(title, author) {
     } catch (_) {
       return null;
     }
-  });
+  })();
 
   cache.set(cacheKey, result);
   return result;
@@ -161,5 +187,7 @@ async function lookupAudnexus(title, author) {
 module.exports = {
   lookupAudnexus,
   cleanTitleForSearch,
+  cleanAudiblePoster,
+  cleanSynopsis,
   _cache: cache,
 };

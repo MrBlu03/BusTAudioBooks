@@ -18,10 +18,13 @@ const { TTLCache, pLimit, withTimeout } = require("./cache");
 const { makeAccess } = require("./access");
 const { getBookKey, sortInSeriesOrder, parseSeriesAndBook, cleanDisplayTitle, expandSeriesPacks } = require("./series");
 const torbox = require("./torbox");
+const nuvio = require("./nuvio");
 
 const app = express();
 const PORT = process.env.PORT || 7000;
 const access = makeAccess(); // shared-token gate (off unless ACCESS_TOKENS set)
+
+app.use(express.json());
 
 const searchCache = new TTLCache(5 * 60 * 1000, 200); // resolved catalog results
 const streamCache = new TTLCache(30 * 60 * 1000, 500); // resolved playable streams
@@ -50,7 +53,7 @@ app.use((req, res, next) => {
   console.log(`[REQ] ${req.method} ${req.originalUrl}`);
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Headers", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   res.setHeader("Content-Type", "application/json; charset=utf-8");
   if (req.method === "OPTIONS") return res.sendStatus(204);
   next();
@@ -132,6 +135,35 @@ const CONFIGURE_HTML = `<!doctype html>
     <input id="accessToken" placeholder="access token"/>
   </div>
 
+  <!-- NUVIO PERSONAL RECOMMENDATIONS SECTION -->
+  <div style="margin-top:22px;padding:16px;background:#1e172a;border-radius:12px;border:1px solid #3d3151">
+    <div style="display:flex;align-items:center;justify-content:space-between">
+      <label style="margin:0;font-size:1rem;color:#f3e8ff">Personal Recommendations (Nuvio)</label>
+      <span id="nuvioBadge" style="display:none;font-size:.78rem;background:#22c55e22;color:#4ade80;border:1px solid #22c55e66;padding:2px 8px;border-radius:99px;font-weight:600">Connected</span>
+    </div>
+    <p style="margin:4px 0 12px;color:#a99fb8;font-size:.85rem">
+      Connect your Nuvio account to get recommendations heavily weighted by what you have actually listened to.
+    </p>
+
+    <label style="margin:8px 0 4px;font-size:.85rem">Nuvio Email</label>
+    <input id="nuvioEmail" type="email" placeholder="you@email.com"/>
+
+    <label style="margin:8px 0 4px;font-size:.85rem">Nuvio Password</label>
+    <input id="nuvioPassword" type="password" placeholder="Nuvio account password"/>
+
+    <div style="display:flex;gap:8px;margin-top:12px">
+      <button type="button" id="btnNuvioLogin" onclick="loginNuvio()" style="margin-top:0;padding:10px;font-size:.9rem;background:#7c3aed">Connect &amp; Select Profile</button>
+      <button type="button" id="btnNuvioClear" onclick="clearNuvio()" style="display:none;margin-top:0;width:auto;padding:10px 14px;font-size:.9rem;background:#3a3147">Disconnect</button>
+    </div>
+    <div id="nuvioMsg" style="margin-top:8px;font-size:.85rem"></div>
+
+    <div id="nuvioProfileDiv" style="display:none;margin-top:12px">
+      <label style="margin:0 0 4px;font-size:.85rem">Audiobook Profile</label>
+      <select id="nuvioProfile" style="width:100%;padding:10px;border-radius:9px;border:1px solid #3a3147;background:#221a2e;color:#fff;font-size:.92rem"></select>
+      <div id="nuvioStats" style="margin-top:8px;font-size:.82rem;color:#94a3b8"></div>
+    </div>
+  </div>
+
   <p id="serverNote" style="display:none;margin-top:16px;color:#8f859e;font-size:.9rem">
     🔎 Search is provided by this server — just add your TorBox key above and install.
   </p>
@@ -174,6 +206,78 @@ function b64url(str){
   return btoa(unescape(encodeURIComponent(str)))
     .replace(/\\+/g,'-').replace(/\\//g,'_').replace(/=+$/,'');
 }
+
+var nuvioProfiles = [];
+
+async function loginNuvio(){
+  var email = document.getElementById('nuvioEmail').value.trim();
+  var password = document.getElementById('nuvioPassword').value;
+  var msg = document.getElementById('nuvioMsg');
+  var btn = document.getElementById('btnNuvioLogin');
+  if(!email || !password){
+    msg.innerHTML = '<span style="color:#f87171">Please enter both Nuvio email and password.</span>';
+    return;
+  }
+  msg.innerHTML = '<span style="color:#94a3b8">Connecting to Nuvio Cloud...</span>';
+  btn.disabled = true;
+  try {
+    var res = await fetch('/api/nuvio/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: email, password: password })
+    });
+    var data = await res.json();
+    if(!data.ok){
+      msg.innerHTML = '<span style="color:#f87171">' + (data.error || 'Login failed') + '</span>';
+      return;
+    }
+    nuvioProfiles = data.profiles || [];
+    var sel = document.getElementById('nuvioProfile');
+    sel.innerHTML = '';
+    nuvioProfiles.forEach(function(p){
+      var opt = document.createElement('option');
+      opt.value = p.index;
+      opt.textContent = p.name + ' (Profile ' + p.index + ')';
+      if(p.index === data.defaultProfileId) opt.selected = true;
+      sel.appendChild(opt);
+    });
+    document.getElementById('nuvioProfileDiv').style.display = 'block';
+    document.getElementById('nuvioBadge').style.display = 'inline-block';
+    document.getElementById('btnNuvioClear').style.display = 'inline-block';
+    msg.innerHTML = '<span style="color:#4ade80">Connected! ' + nuvioProfiles.length + ' profile(s) found.</span>';
+    checkNuvioStatus(email, password, sel.value);
+  } catch(e) {
+    msg.innerHTML = '<span style="color:#f87171">Connection error: ' + e.message + '</span>';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function checkNuvioStatus(email, password, profileId){
+  var stats = document.getElementById('nuvioStats');
+  try {
+    var res = await fetch('/api/nuvio/status', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: email, password: password, profileId: profileId })
+    });
+    var data = await res.json();
+    if(data.ok){
+      stats.innerHTML = '🎧 <b>' + data.consumedCount + '</b> actively listened books · 📚 <b>' + data.libraryCount + '</b> library books';
+    }
+  } catch(_) {}
+}
+
+function clearNuvio(){
+  document.getElementById('nuvioEmail').value = '';
+  document.getElementById('nuvioPassword').value = '';
+  document.getElementById('nuvioProfileDiv').style.display = 'none';
+  document.getElementById('nuvioBadge').style.display = 'none';
+  document.getElementById('btnNuvioClear').style.display = 'none';
+  document.getElementById('nuvioMsg').innerHTML = '';
+  nuvioProfiles = [];
+}
+
 function gen(){
   var apiKey=document.getElementById('apiKey').value.trim();
   if(!apiKey){ alert('TorBox API key is required'); return; }
@@ -187,18 +291,30 @@ function gen(){
   if(document.getElementById('instantOnly').checked) cfg.instantOnly=true;
   var tok=document.getElementById('accessToken').value.trim();
   if(tok) cfg.token=tok;
+
+  var nEmail = document.getElementById('nuvioEmail').value.trim();
+  var nPass = document.getElementById('nuvioPassword').value;
+  var nProf = document.getElementById('nuvioProfile').value;
+  if(nEmail && nPass){
+    cfg.nuvio = {
+      email: nEmail,
+      password: nPass,
+      profileId: parseInt(nProf, 10) || 1
+    };
+  }
+
   var seg=b64url(JSON.stringify(cfg));
   var base=location.origin+'/'+seg+'/manifest.json';
   document.getElementById('url').value=base;
   document.getElementById('install').href=base.replace(/^https?:/,'stremio:');
   document.getElementById('out').style.display='block';
 }
+
 function copy(){
   var f=document.getElementById('url'); f.select();
   navigator.clipboard.writeText(f.value);
 }
-// When the server already provides search (env vars), hide the source fields
-// so users only need their TorBox key.
+
 if (window.__serverSearch) {
   document.getElementById('sourceCfg').style.display='none';
   document.getElementById('serverNote').style.display='block';
@@ -206,15 +322,101 @@ if (window.__serverSearch) {
 if (window.__requireToken) {
   document.getElementById('tokenCfg').style.display='block';
 }
+if (window.__initCfg) {
+  var c = window.__initCfg;
+  if (c.apiKey) document.getElementById('apiKey').value = c.apiKey;
+  if (c.abbDomain) document.getElementById('abbDomain').value = c.abbDomain;
+  if (c.jackettUrl) document.getElementById('jackettUrl').value = c.jackettUrl;
+  if (c.jackettApiKey) document.getElementById('jackettApiKey').value = c.jackettApiKey;
+  if (c.instantOnly) document.getElementById('instantOnly').checked = true;
+  if (c.token) document.getElementById('accessToken').value = c.token;
+  var n = c.nuvio || (c.nuvioEmail ? { email: c.nuvioEmail, password: c.nuvioPassword, profileId: c.nuvioProfileId } : null);
+  if (n && n.email) {
+    document.getElementById('nuvioEmail').value = n.email;
+    if (n.password) document.getElementById('nuvioPassword').value = n.password;
+    if (n.profileId) {
+      var sel = document.getElementById('nuvioProfile');
+      var opt = document.createElement('option');
+      opt.value = n.profileId;
+      opt.textContent = 'Profile ' + n.profileId;
+      opt.selected = true;
+      sel.appendChild(opt);
+      document.getElementById('nuvioProfileDiv').style.display = 'block';
+    }
+    document.getElementById('nuvioBadge').style.display = 'inline-block';
+    document.getElementById('btnNuvioClear').style.display = 'inline-block';
+  }
+}
 </script>
 </body></html>`;
 
-function sendConfigure(_req, res) {
+// ---- Nuvio Auth & Profile API -----------------------------------------------
+app.post("/api/nuvio/login", async (req, res) => {
+  try {
+    const { email, password } = req.body || {};
+    if (!email || !password) {
+      return res.status(400).json({ ok: false, error: "Nuvio email and password are required." });
+    }
+    const creds = { email: String(email).trim(), password: String(password) };
+    const profiles = await nuvio.listProfiles(creds);
+
+    let defaultProfileId = 1;
+    const audiobookProf = profiles.find((p) => /audiobook/i.test(p.name));
+    if (audiobookProf) {
+      defaultProfileId = audiobookProf.profile_index;
+    } else if (profiles[0]) {
+      defaultProfileId = profiles[0].profile_index;
+    }
+
+    res.json({
+      ok: true,
+      email: creds.email,
+      profiles: profiles.map((p) => ({ id: p.id, index: p.profile_index, name: p.name })),
+      defaultProfileId,
+    });
+  } catch (err) {
+    console.warn("nuvio login failed:", err.message);
+    let msg = "Failed to connect to Nuvio Cloud";
+    if (/400|401|invalid|credential|password/i.test(err.message)) {
+      msg = "Invalid Nuvio email or password";
+    }
+    res.status(401).json({ ok: false, error: msg });
+  }
+});
+
+app.post("/api/nuvio/status", async (req, res) => {
+  try {
+    const { email, password, profileId } = req.body || {};
+    const creds = nuvio.getCredentials({ email, password });
+    if (!creds) {
+      return res.status(400).json({ ok: false, error: "Nuvio credentials required." });
+    }
+    const profIndex = nuvio.parseProfileIndex(profileId) || 1;
+    const activity = await nuvio.pullUserHistoryAndLibrary(profIndex, creds);
+    res.json({
+      ok: true,
+      profileIndex: profIndex,
+      consumedCount: activity.watchItems.length,
+      libraryCount: activity.libraryItems.length,
+      fingerprint: activity.fingerprint.slice(0, 12),
+      sampleConsumed: activity.watchItems.slice(0, 3).map((w) => ({
+        name: w.name,
+        progress: `${w.progressPercent}%`,
+      })),
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+function sendConfigure(req, res) {
   const serverSearch =
     (!!process.env.JACKETT_URL && !!process.env.JACKETT_API_KEY) || !!process.env.ABB_DOMAIN;
+  let initCfg = req.params.config ? decodeConfig(req.params.config) : null;
   const flag =
     `<script>window.__serverSearch=${serverSearch ? "true" : "false"};` +
-    `window.__requireToken=${access.required ? "true" : "false"};</script>`;
+    `window.__requireToken=${access.required ? "true" : "false"};` +
+    `window.__initCfg=${initCfg ? JSON.stringify(initCfg) : "null"};</script>`;
   res.setHeader("Content-Type", "text/html; charset=utf-8");
   res.send(CONFIGURE_HTML.replace("</head>", `${flag}</head>`));
 }
@@ -225,10 +427,8 @@ app.get("/:config/configure", sendConfigure);
 
 // ---- Manifest ---------------------------------------------------------------
 function handleManifest(req, res) {
-  // Only advertise the recommendations row when it has something to show, so a
-  // shared install does not offer everyone an empty category.
-  const man = buildManifest({ withRecs: hasRecs() });
   const cfg = req.params.config ? decodeConfig(req.params.config) : (process.env.TORBOX_API_KEY ? { apiKey: process.env.TORBOX_API_KEY } : null);
+  const man = buildManifest({ withRecs: hasRecs(cfg) });
   if (cfg && cfg.apiKey) {
     return res.json({ ...man, behaviorHints: { ...man.behaviorHints, configurationRequired: false } });
   }
@@ -363,7 +563,7 @@ async function handleCatalog(req, res, extraRaw) {
     // entry already carries the release to play, so this branch does no network
     // work at all. That matters — resolving here meant firing one source request
     // per book at once, which AudiobookBay answers with an empty page.
-    const list = getRecs();
+    const list = getRecs(cfg);
     searchQuery = "";
     isRecsRow = true;
     if (!list.items.length) {
@@ -374,6 +574,7 @@ async function handleCatalog(req, res, extraRaw) {
       // Prefer the clean book title from the recommendation over the messy release name
       best.name = rec.title || best.name;
       if (rec.author) best.author = rec.author;
+      if (rec.poster) best.poster = rec.poster;
       if (rec.reason) best.reason = rec.reason;
       return best;
     });
@@ -387,130 +588,9 @@ async function handleCatalog(req, res, extraRaw) {
     } catch (_) {}
   }
 
-  const FEATURED_AUDIOBOOKS = [
-    {
-      name: "Foundation (Book 1) - Isaac Asimov",
-      infohash: "ecef732d642e3c980dffbb8b335dc5f22cdfc4b0",
-      magnet: "magnet:?xt=urn:btih:ecef732d642e3c980dffbb8b335dc5f22cdfc4b0&dn=Foundation+Series+1-7+-+Isaac+Asimov",
-      format: "M4B",
-      bitrate: "128 kbps",
-      author: "Isaac Asimov",
-      poster: "https://images.audiobookcovers.com/jpeg/640/1b11cb3d-4316-4a8f-9cf1-e3e5b3080f6a.jpg",
-    },
-    {
-      name: "Dark Disciple, Star Wars by Christie Golden",
-      infohash: "e8b9151ca7468ba934fc1cd83ea2837ce84ecb1a",
-      magnet: "magnet:?xt=urn:btih:e8b9151ca7468ba934fc1cd83ea2837ce84ecb1a&dn=Dark+Disciple%2C+Star+Wars+by+Christie+Golden+M4B",
-      format: "M4B",
-      bitrate: "64 kbps",
-      author: "Christie Golden",
-      poster: "https://images.audiobookcovers.com/jpeg/640/550f5638-b509-4bc1-bf09-600c9f912e9d.jpg",
-    },
-    {
-      name: "Dune - Frank Herbert",
-      infohash: "061850ead3eb6f1c5c6d8420211b4bbf2d4ee3e2",
-      magnet: "magnet:?xt=urn:btih:061850ead3eb6f1c5c6d8420211b4bbf2d4ee3e2&dn=Dune+-+Frank+Herbert",
-      format: "M4B",
-      bitrate: "64 kbps",
-      author: "Frank Herbert",
-      poster: "https://is1-ssl.mzstatic.com/image/thumb/Music122/v4/6a/c7/3a/6ac73abf-9b1c-0869-b9f0-3cc93de3f805/9781427201447.jpg/600x600bb.jpg",
-    },
-    {
-      name: "Project Hail Mary - Andy Weir",
-      infohash: "4a2b978d30e3860bb4d9fe67fc00632b512bb64d",
-      magnet: "magnet:?xt=urn:btih:4a2b978d30e3860bb4d9fe67fc00632b512bb64d&dn=Project+Hail+Mary+-+Andy+Weir",
-      format: "M4B",
-      bitrate: "64 kbps",
-      author: "Andy Weir",
-      poster: "https://images.audiobookcovers.com/jpeg/640/36ba5fc6-81da-45e3-855f-8cbbdf995ad4.jpg",
-    },
-    {
-      name: "The Fellowship of the Ring - J.R.R. Tolkien",
-      infohash: "b0b2e352467d302c918c5e9dbd74ecae790f9cb2",
-      magnet: "magnet:?xt=urn:btih:b0b2e352467d302c918c5e9dbd74ecae790f9cb2&dn=The+Fellowship+of+the+Ring",
-      format: "M4B",
-      bitrate: "64 kbps",
-      author: "J.R.R. Tolkien",
-      poster: "https://images.audiobookcovers.com/jpeg/640/599e557b-7b3b-48ae-94d7-ea762ff0ce3b.jpg",
-    },
-    {
-      name: "Harry Potter and the Sorcerer's Stone - J.K. Rowling",
-      infohash: "099a9b6c075191bf1cf89736c53e0eb6a7c47402",
-      magnet: "magnet:?xt=urn:btih:099a9b6c075191bf1cf89736c53e0eb6a7c47402&dn=Harry+Potter+Book+1",
-      format: "M4B",
-      bitrate: "64 kbps",
-      author: "J.K. Rowling",
-      poster: "https://images.audiobookcovers.com/jpeg/640/d6ba5ea1-e5d4-48ee-8815-4fa7fcb4a8e2.jpg",
-    },
-    {
-      name: "The Way of Kings - Brandon Sanderson",
-      infohash: "e6f488ee273397ea9fae5e6e33db0e073c6a461b",
-      magnet: "magnet:?xt=urn:btih:e6f488ee273397ea9fae5e6e33db0e073c6a461b&dn=The+Way+of+Kings",
-      format: "M4B",
-      bitrate: "64 kbps",
-      author: "Brandon Sanderson",
-      poster: "https://images.audiobookcovers.com/jpeg/640/d5f483c6-946e-44fa-a58d-fa66e2c07342.jpg",
-    },
-    {
-      name: "A Game of Thrones - George R.R. Martin",
-      infohash: "d425a8370125a1e7b2501a35561a1532454a329e",
-      magnet: "magnet:?xt=urn:btih:d425a8370125a1e7b2501a35561a1532454a329e&dn=A+Game+of+Thrones",
-      format: "M4B",
-      bitrate: "64 kbps",
-      author: "George R.R. Martin",
-      poster: "https://images.audiobookcovers.com/jpeg/640/e6d506d1-496c-48c0-8339-ff748950d877.jpg",
-    },
-    {
-      name: "Red Rising - Pierce Brown",
-      infohash: "d8ef3f4c6e94a81b373fa839ee8a6c8e76cba945",
-      magnet: "magnet:?xt=urn:btih:d8ef3f4c6e94a81b373fa839ee8a6c8e76cba945&dn=Red+Rising",
-      format: "M4B",
-      bitrate: "64 kbps",
-      author: "Pierce Brown",
-      poster: "https://images.audiobookcovers.com/jpeg/640/c87fe6f6-4999-4d64-a745-f09c855a90ad.jpg",
-    },
-    {
-      name: "The Hitchhiker's Guide to the Galaxy - Douglas Adams",
-      infohash: "74ec39ba5b1d9fa496a75f10b2d6a504ef3a7268",
-      magnet: "magnet:?xt=urn:btih:74ec39ba5b1d9fa496a75f10b2d6a504ef3a7268&dn=Hitchhikers+Guide",
-      format: "MP3",
-      bitrate: "128 kbps",
-      author: "Douglas Adams",
-      poster: "https://images.audiobookcovers.com/jpeg/640/cf5668ef-c44d-44a7-b12e-1c4b7593c126.jpg",
-    },
-    {
-      name: "1984 - George Orwell",
-      infohash: "c25345a90e38101a1d94bf820658faee2e9573ad",
-      magnet: "magnet:?xt=urn:btih:c25345a90e38101a1d94bf820658faee2e9573ad&dn=1984+-+George+Orwell",
-      format: "MP3",
-      bitrate: "128 kbps",
-      author: "George Orwell",
-      poster: "https://images.audiobookcovers.com/jpeg/640/bc5d9f0a-7b3b-4659-b1d7-21b8b809d3b4.jpg",
-    },
-    {
-      name: "The Last Wish - Andrzej Sapkowski",
-      infohash: "f46049ee17fa5b5f36e84db65a25ae45f92c10b7",
-      magnet: "magnet:?xt=urn:btih:f46049ee17fa5b5f36e84db65a25ae45f92c10b7&dn=The+Last+Wish",
-      format: "M4B",
-      bitrate: "64 kbps",
-      author: "Andrzej Sapkowski",
-      poster: "https://images.audiobookcovers.com/jpeg/640/db16503c-8b77-4df6-a67b-1cb8ff8f79f8.jpg",
-    },
-  ];
-
-  // When browsing catalog or when live search returns 0 results, fallback to featured items
-  let finalItems = items;
-  if ((!finalItems || finalItems.length === 0) && !isRecsRow) {
-    if (query) {
-      const q = query.toLowerCase();
-      finalItems = FEATURED_AUDIOBOOKS.filter(
-        (b) =>
-          b.name.toLowerCase().includes(q) || (b.author && b.author.toLowerCase().includes(q))
-      );
-    } else {
-      finalItems = FEATURED_AUDIOBOOKS;
-    }
-  }
+  // Strict constraint: absolutely no hardcoded fallbacks or placeholder books.
+  // Either real audiobooks are resolved dynamically or return empty.
+  const finalItems = items || [];
 
   // Expand multi-book series packs into separate individual books and exclude omnibus bundles
   const expandedItems = expandSeriesPacks(finalItems, searchQuery);
@@ -549,7 +629,7 @@ async function handleCatalog(req, res, extraRaw) {
 
   const metas = paged.map((r) => ({
     id: encodeItemId(r),
-    type: req.params.type || "audiobook",
+    type: req.params.type || "other",
     name: prettyName(r.name),
     poster: r.poster || undefined,
     posterShape: "square",

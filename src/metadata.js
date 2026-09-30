@@ -377,12 +377,39 @@ async function enrich(raw, type = "audiobook") {
         };
       }
     } else {
-      // Audiobook lookup: query providers concurrently.
-      // Audnexus (Audible API + Audnexus) leads as the gold standard used by Plex
-      // Audiobooks.bundle / Audiobookshelf. Libex serves as the primary Audible
-      // fallback, followed by iTunes, Google Books, Open Library, and Wikipedia.
-      const [an, lx, it, gb, ol, wiki] = await Promise.all([
-        withTimeout(audnexus.lookupAudnexus(title, author).catch(() => null), 3000, null),
+      // Audiobook lookup: Tiered resolution pipeline.
+      // Audnexus (Audible API + Audnexus) is the gold standard used by Plex
+      // Audiobooks.bundle / Audiobookshelf. When Audnexus returns an official match
+      // with studio cover art, resolve immediately to minimize latency and avoid
+      // hammering secondary APIs.
+      let an = null;
+      try {
+        an = await withTimeout(audnexus.lookupAudnexus(title, author), 2500, null);
+      } catch (_) {}
+
+      if (an && an.poster) {
+        result = {
+          title: an.title || title,
+          poster: an.poster,
+          author: an.author || author || null,
+          description: an.description || null,
+          year: an.year || null,
+          genres: an.genres || [],
+          narrator: an.narrator || null,
+          duration: an.duration || null,
+          series: an.series || null,
+          seriesIndex: an.seriesIndex || null,
+          publisher: null,
+          asin: an.asin || null,
+          rating: an.rating || null,
+          source: "audnexus",
+        };
+        metaCache.set(key, result);
+        return result;
+      }
+
+      // Secondary fallback pipeline: query Libex, iTunes, Google Books, Open Library, and Wikipedia
+      const [lx, it, gb, ol, wiki] = await Promise.all([
         withTimeout(libex.lookup(title, author).catch(() => null), 2500, null),
         withTimeout(fromItunes(title, author, raw).catch(() => null), 2000, null),
         withTimeout(fromGoogleBooks(title, author).catch(() => null), 2000, null),
@@ -390,21 +417,18 @@ async function enrich(raw, type = "audiobook") {
         withTimeout(fromWikipedia(title, author).catch(() => null), 2000, null),
       ]);
 
-      const candidates = [an, lx, it, gb, ol, wiki].filter(Boolean);
+      const candidates = [lx, it, gb, ol, wiki].filter(Boolean);
       const poster =
-        (an && an.poster) ||
         (lx && lx.poster) ||
         (it && it.poster) ||
         (candidates.find((c) => c.poster) || {}).poster ||
         null;
       const authorFound =
-        (an && an.author) ||
         (lx && lx.author) ||
         (candidates.find((c) => c.author) || {}).author ||
         author ||
         null;
       const description =
-        (an && an.description) ||
         (lx && lx.description) ||
         (it && it.description) ||
         (ol && ol.description) ||
@@ -412,15 +436,13 @@ async function enrich(raw, type = "audiobook") {
         (wiki && wiki.description) ||
         null;
       const year =
-        (an && an.year) ||
         (lx && lx.year) ||
         (it && it.year) ||
         (ol && ol.year) ||
         (gb && gb.year) ||
         null;
-      // Prefer Audnexus / Libex genres: they are official Audible categories
+      // Prefer Audible genres from Libex when available
       const genres =
-        (an && an.genres && an.genres.length > 0 && an.genres) ||
         (lx && lx.genres && lx.genres.length > 0 && lx.genres) ||
         (ol && ol.genres && ol.genres.length > 0 && ol.genres) ||
         (gb && gb.genres && gb.genres.length > 0 && gb.genres) ||
@@ -428,20 +450,20 @@ async function enrich(raw, type = "audiobook") {
         [];
 
       result = {
-        title: (an && an.title) || title,
+        title: title,
         poster,
         author: authorFound,
         description,
         year,
         genres,
-        narrator: (an && an.narrator) || (lx && lx.narrator) || null,
-        duration: (an && an.duration) || (lx && lx.duration) || null,
-        series: (an && an.series) || (lx && lx.series) || null,
-        seriesIndex: (an && an.seriesIndex) || (lx && lx.seriesIndex) || null,
+        narrator: (lx && lx.narrator) || null,
+        duration: (lx && lx.duration) || null,
+        series: (lx && lx.series) || null,
+        seriesIndex: (lx && lx.seriesIndex) || null,
         publisher: (lx && lx.publisher) || null,
-        asin: (an && an.asin) || (lx && lx.asin) || null,
-        rating: (an && an.rating) || null,
-        source: an ? "audnexus" : lx ? "libex" : "legacy",
+        asin: (lx && lx.asin) || null,
+        rating: null,
+        source: lx ? "libex" : "legacy",
       };
     }
   }

@@ -1,24 +1,13 @@
 // src/nuvio.js
-// Nuvio Cloud API client (https://api.nuvio.tv) — used to read the user's own
-// library so the addon can build personal recommendations.
-//
-// WHY THE LIBRARY, NOT WATCH HISTORY
-// The public API documents watch-history `content_type` as "movie or series"
-// only. Audiobooks are not a first-class content type there. The library is
-// generic, so audiobooks in the audiobook profile are expected to appear as
-// library items (typically with a custom content_type and an ISBN/ASIN-shaped
-// content_id). Nothing here assumes that: pullLibrary() reports whatever is
-// actually stored, grouped by content_type, so the shape can be inspected
-// before any recommendations are generated.
+// Nuvio Cloud API client (https://api.nuvio.tv) — used to read the user's
+// watch progress and library so the addon can build personal recommendations.
 //
 // AUTH
 // The publishable key is public by design and published in Nuvio's own docs.
-// The access token is not: we sign in with the account's email and password,
-// which Supabase exchanges for an access token (1 h) plus a refresh token.
-// Refresh tokens rotate, so they are cached on disk and renewed as needed.
-// The password is only ever read from the environment.
-//
-// Disable entirely with NUVIO_ENABLED=0.
+// The access token is exchanged via Supabase from the user's email + password,
+// returning an access token (1 h) and a refresh token.
+// Credentials can be supplied per-user via the configuration payload, or
+// fall back to environment variables for local testing.
 
 const fs = require("fs");
 const path = require("path");
@@ -43,23 +32,32 @@ const TOKEN_SKEW_MS = 5 * 60 * 1000;
 const TIMEOUT_MS = parseInt(process.env.NUVIO_TIMEOUT_MS || "15000", 10);
 
 const rateLimit = pLimit(3);
-const authCache = new TTLCache(60 * 1000, 10); // dedupes concurrent sign-ins
+const authCache = new TTLCache(60 * 1000, 20); // dedupes concurrent sign-ins
+const userTokens = new Map(); // in-memory session tokens isolated per email
 
 // -- credentials --------------------------------------------------------------
 
 /**
- * Read Nuvio credentials from the environment.
+ * Read Nuvio credentials from the passed config or environment.
  * Returns null when either half is missing, so callers can degrade quietly.
  */
-function getCredentials() {
+function getCredentials(cfg = null) {
+  if (cfg && typeof cfg === "object") {
+    const email = String(
+      cfg.nuvioEmail || (cfg.nuvio && cfg.nuvio.email) || cfg.email || ""
+    ).trim();
+    const password =
+      cfg.nuvioPassword || (cfg.nuvio && cfg.nuvio.password) || cfg.password || "";
+    if (email && password) return { email, password };
+  }
   const email = String(process.env.NUVIO_EMAIL || "").trim();
   const password = process.env.NUVIO_PASSWORD || "";
   if (!email || !password) return null;
   return { email, password };
 }
 
-function isConfigured() {
-  return Boolean(getCredentials());
+function isConfigured(cfg = null) {
+  return Boolean(getCredentials(cfg));
 }
 
 // -- token storage ------------------------------------------------------------
@@ -113,8 +111,6 @@ async function post(url, body, headers = {}) {
 
 // -- auth ---------------------------------------------------------------------
 
-let tokenState = readTokenFile();
-
 function tokenExpiry(token) {
   const exp = token && token.expires_at;
   if (typeof exp === "number") return exp * 1000; // Supabase sends epoch seconds
@@ -127,57 +123,67 @@ function tokenExpiry(token) {
   return 0;
 }
 
-async function requestToken(grant) {
+async function requestToken(grant, emailKey = "default") {
   const data = await post(
     `${AUTH}/token?grant_type=${grant.type}`,
     grant.body,
     grant.headers
   );
   if (!data || !data.access_token) throw new Error("Nuvio auth returned no access_token");
-  tokenState = {
+  const state = {
     access_token: data.access_token,
     refresh_token: data.refresh_token,
     expires_at: Math.floor(Date.now() / 1000) + (data.expires_in || 3600),
   };
-  writeTokenFile(tokenState);
-  return tokenState;
+  userTokens.set(emailKey, state);
+  if (emailKey === "default" && process.env.NUVIO_EMAIL) {
+    writeTokenFile(state);
+  }
+  return state;
 }
 
 /** Exchange the stored refresh token for a new access token. */
-function refreshAccessToken() {
+function refreshAccessToken(tokenState, emailKey = "default") {
   if (!tokenState || !tokenState.refresh_token) {
     return Promise.reject(new Error("no refresh token available"));
   }
-  return requestToken({
-    type: "refresh_token",
-    headers: {},
-    body: { refresh_token: tokenState.refresh_token },
-  });
+  return requestToken(
+    {
+      type: "refresh_token",
+      headers: {},
+      body: { refresh_token: tokenState.refresh_token },
+    },
+    emailKey
+  );
 }
 
 /** Sign in with email + password. Cached briefly so bursts share one call. */
-function signIn() {
-  const cached = authCache.get("signin");
-  if (cached) return Promise.resolve(cached);
-
-  const creds = getCredentials();
+function signIn(explicitCreds = null) {
+  const creds = getCredentials(explicitCreds);
   if (!creds) {
     return Promise.reject(new Error("NUVIO_EMAIL / NUVIO_PASSWORD are not set"));
   }
 
+  const emailKey = creds.email.toLowerCase();
+  const cached = authCache.get(`signin:${emailKey}`);
+  if (cached) return Promise.resolve(cached);
+
   const p = rateLimit(() =>
-    requestToken({
-      type: "password",
-      headers: {},
-      body: { email: creds.email, password: creds.password },
-    })
+    requestToken(
+      {
+        type: "password",
+        headers: {},
+        body: { email: creds.email, password: creds.password },
+      },
+      emailKey
+    )
   )()
     .then((tok) => {
-      authCache.set("signin", tok, 60 * 1000);
+      authCache.set(`signin:${emailKey}`, tok, 60 * 1000);
       return tok;
     })
     .catch((err) => {
-      authCache.delete?.("signin");
+      authCache.delete?.(`signin:${emailKey}`);
       throw err;
     });
 
@@ -185,36 +191,54 @@ function signIn() {
 }
 
 /** A valid access token, renewing via refresh_token when it is close to expiry. */
-async function getAccessToken() {
-  if (tokenState && tokenState.access_token && tokenExpiry(tokenState) - TOKEN_SKEW_MS > Date.now()) {
+async function getAccessToken(explicitCreds = null) {
+  const creds = getCredentials(explicitCreds);
+  if (!creds) {
+    throw new Error("NUVIO_EMAIL / NUVIO_PASSWORD are not set");
+  }
+
+  const emailKey = creds.email.toLowerCase();
+  let tokenState = userTokens.get(emailKey);
+  if (!tokenState && emailKey === String(process.env.NUVIO_EMAIL || "").toLowerCase()) {
+    tokenState = readTokenFile();
+    if (tokenState) userTokens.set(emailKey, tokenState);
+  }
+
+  if (
+    tokenState &&
+    tokenState.access_token &&
+    tokenExpiry(tokenState) - TOKEN_SKEW_MS > Date.now()
+  ) {
     return tokenState.access_token;
   }
   if (tokenState && tokenState.refresh_token) {
     try {
-      const tok = await refreshAccessToken();
+      const tok = await refreshAccessToken(tokenState, emailKey);
       return tok.access_token;
     } catch (err) {
-      // A dead refresh token means the password was changed or revoked.
-      // Fall through and re-authenticate from credentials.
       console.warn("nuvio: refresh failed, re-authenticating:", err.message);
     }
   }
-  const tok = await signIn();
+  const tok = await signIn(creds);
   return tok.access_token;
 }
 
 // -- RPC ----------------------------------------------------------------------
 
 /** POST an RPC function, retrying once on a 401 by re-authenticating. */
-async function rpc(fn, body = {}) {
+async function rpc(fn, body = {}, explicitCreds = null) {
   if (!ENABLED) throw new Error("Nuvio integration is disabled");
-  const token = await getAccessToken();
+  const token = await getAccessToken(explicitCreds);
   try {
-    return await rateLimit(() => post(`${REST}/rpc/${fn}`, body, { Authorization: `Bearer ${token}` }))();
+    return await rateLimit(() =>
+      post(`${REST}/rpc/${fn}`, body, { Authorization: `Bearer ${token}` })
+    )();
   } catch (err) {
     if (err.status === 401) {
-      const fresh = await signIn();
-      return post(`${REST}/rpc/${fn}`, body, { Authorization: `Bearer ${fresh.access_token}` });
+      const fresh = await signIn(explicitCreds);
+      return post(`${REST}/rpc/${fn}`, body, {
+        Authorization: `Bearer ${fresh.access_token}`,
+      });
     }
     throw err;
   }
@@ -224,14 +248,12 @@ async function rpc(fn, body = {}) {
  * List the account's profiles (1..6 per user).
  * @returns {Promise<Array<{id:string, profile_index:number, name:string}>>}
  */
-async function listProfiles() {
-  const rows = await rpc("sync_pull_profiles");
+async function listProfiles(explicitCreds = null) {
+  const rows = await rpc("sync_pull_profiles", {}, explicitCreds);
   return Array.isArray(rows) ? rows : [];
 }
 
 function parseProfileIndex(value) {
-  // Reject fractional input explicitly: parseInt would silently turn 1.5
-  // into 1, and a profile index that is not exactly 1..6 is a config error.
   const n = typeof value === "number" ? value : parseInt(String(value).trim(), 10);
   if (!Number.isInteger(n) || n < 1 || n > 6) return null;
   return n;
@@ -241,19 +263,22 @@ function parseProfileIndex(value) {
  * Pull library changes after a cursor, following pagination to the end.
  * @returns {Promise<{events: object[], lastEventId: number}>}
  */
-async function pullLibraryDelta(profileIndex, sinceEventId = 0, limit = 1000) {
+async function pullLibraryDelta(profileIndex, sinceEventId = 0, limit = 1000, explicitCreds = null) {
   const events = [];
   let cursor = Number(sinceEventId) || 0;
   for (;;) {
-    const page = await rpc("sync_pull_library_delta", {
-      p_profile_id: profileIndex,
-      p_since_event_id: cursor,
-      p_limit: limit,
-    });
+    const page = await rpc(
+      "sync_pull_library_delta",
+      {
+        p_profile_id: profileIndex,
+        p_since_event_id: cursor,
+        p_limit: limit,
+      },
+      explicitCreds
+    );
     const batch = Array.isArray(page) ? page : [];
     if (!batch.length) break;
     events.push(...batch);
-    // Ordered by event_id ASC, so the last one is the new cursor.
     const last = batch[batch.length - 1].event_id;
     cursor = Number.isFinite(last) ? last : cursor;
     if (batch.length < limit) break;
@@ -262,15 +287,137 @@ async function pullLibraryDelta(profileIndex, sinceEventId = 0, limit = 1000) {
 }
 
 /** Full library snapshot (the bootstrap path, used on first run). */
-async function pullLibrary(profileIndex) {
-  const rows = await rpc("sync_pull_library", { p_profile_id: profileIndex });
+async function pullLibrary(profileIndex, explicitCreds = null) {
+  const rows = await rpc("sync_pull_library", { p_profile_id: profileIndex }, explicitCreds);
   return Array.isArray(rows) ? rows : [];
 }
 
-async function libraryDeltaCursor(profileIndex) {
-  const n = await rpc("sync_get_library_delta_cursor", { p_profile_id: profileIndex });
+async function libraryDeltaCursor(profileIndex, explicitCreds = null) {
+  const n = await rpc("sync_get_library_delta_cursor", { p_profile_id: profileIndex }, explicitCreds);
   const v = parseInt(n, 10);
   return Number.isFinite(v) ? v : 0;
+}
+
+// -- watch history & progress -------------------------------------------------
+
+/**
+ * Decode a tbab: content_id payload into its JSON metadata.
+ */
+function decodeTbabId(contentId) {
+  if (!contentId || typeof contentId !== "string" || !contentId.startsWith("tbab:")) return null;
+  try {
+    const raw = Buffer.from(contentId.slice(5), "base64url").toString("utf8");
+    return JSON.parse(raw);
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
+ * Pull active watch progress and completed watched items for a profile.
+ * Decodes tbab release payloads to identify the audiobooks actually listened to.
+ *
+ * @returns {Promise<Array<{contentId: string, name: string, contentType: string, position: number, duration: number, progressPercent: number, lastWatched: number, decoded: object|null}>>}
+ */
+async function pullWatchProgress(profileIndex, explicitCreds = null) {
+  const items = [];
+  try {
+    const rows = await rpc(
+      "sync_pull_watch_progress",
+      {
+        p_profile_id: profileIndex,
+        p_since_last_watched: 0,
+        p_limit: 100,
+      },
+      explicitCreds
+    );
+    if (Array.isArray(rows)) {
+      items.push(...rows);
+    }
+  } catch (err) {
+    console.warn("nuvio: error pulling watch progress:", err.message);
+  }
+
+  try {
+    const watched = await rpc(
+      "sync_pull_watched_items",
+      {
+        p_profile_id: profileIndex,
+        p_page: 1,
+        p_page_size: 100,
+      },
+      explicitCreds
+    );
+    if (Array.isArray(watched)) {
+      for (const w of watched) {
+        if (!items.some((it) => it.content_id === w.content_id)) {
+          items.push({
+            content_id: w.content_id,
+            content_type: w.content_type || "audiobook",
+            position: 1,
+            duration: 1, // 100% completed
+            last_watched: w.watched_at ? Date.parse(w.watched_at) : Date.now(),
+          });
+        }
+      }
+    }
+  } catch (err) {
+    console.warn("nuvio: error pulling watched items:", err.message);
+  }
+
+  const out = [];
+  for (const row of items) {
+    const contentId = row.content_id || row.id || "";
+    const decoded = decodeTbabId(contentId);
+    const rawName = decoded?.n || row.title || row.name || "";
+    const position = Number(row.position) || 0;
+    const duration = Number(row.duration) || 0;
+    const progressPercent =
+      duration > 0 ? Math.min(100, Math.round((position / duration) * 100)) : 0;
+    const lastWatched =
+      Number(row.last_watched) || (row.watched_at ? Date.parse(row.watched_at) : 0);
+
+    out.push({
+      contentId,
+      name: rawName,
+      contentType: row.content_type || "audiobook",
+      position,
+      duration,
+      progressPercent,
+      lastWatched,
+      decoded,
+    });
+  }
+
+  // Sort by most recently consumed first
+  out.sort((a, b) => b.lastWatched - a.lastWatched);
+  return out;
+}
+
+/**
+ * Pull both watch progress (actively consumed) and library (saved).
+ */
+async function pullUserHistoryAndLibrary(profileIndex, explicitCreds = null) {
+  const [watchItems, { events }] = await Promise.all([
+    pullWatchProgress(profileIndex, explicitCreds),
+    pullLibraryDelta(profileIndex, 0, 1000, explicitCreds),
+  ]);
+
+  const libraryState = new Map();
+  for (const ev of events) {
+    const key = ev.content_id || ev.id;
+    if (!key) continue;
+    if (ev.operation === "delete") libraryState.delete(key);
+    else libraryState.set(key, ev);
+  }
+
+  const libraryItems = [...libraryState.values()].map(normaliseItem).filter(Boolean);
+
+  return {
+    watchItems,
+    libraryItems,
+    fingerprint: hashActivityFingerprint([...libraryState.keys()], watchItems),
+  };
 }
 
 // -- normalisation ------------------------------------------------------------
@@ -298,8 +445,6 @@ function normaliseItem(row) {
 
 /**
  * Group a set of Nuvio records by content_type and drop empty groups.
- * Exposed so the caller can report what a profile actually contains before
- * spending tokens on generation.
  */
 function summariseByType(items) {
   const groups = new Map();
@@ -319,12 +464,24 @@ function summariseByType(items) {
 
 /**
  * Stable fingerprint of a set of content ids.
- * Used to decide whether anything changed, so recommendations are only
- * regenerated when the library actually moves.
  */
 function hashContentIds(ids) {
   const sorted = [...new Set(ids.filter(Boolean).map(String))].sort();
   return crypto.createHash("sha256").update(sorted.join("\n")).digest("hex");
+}
+
+/**
+ * Combined activity fingerprint: detects additions/deletions in library
+ * OR new listening progress / history.
+ */
+function hashActivityFingerprint(libraryIds, watchItems = []) {
+  const libPart = [...new Set(libraryIds.filter(Boolean).map(String))].sort().join("\n");
+  const watchPart = watchItems
+    .filter((w) => w && w.contentId)
+    .map((w) => `${w.contentId}:${w.progressPercent}:${w.lastWatched}`)
+    .sort()
+    .join("\n");
+  return crypto.createHash("sha256").update(`${libPart}\n---\n${watchPart}`).digest("hex");
 }
 
 module.exports = {
@@ -340,6 +497,10 @@ module.exports = {
   pullLibrary,
   pullLibraryDelta,
   libraryDeltaCursor,
+  pullWatchProgress,
+  pullUserHistoryAndLibrary,
+  decodeTbabId,
+  hashActivityFingerprint,
   normaliseItem,
   summariseByType,
   hashContentIds,

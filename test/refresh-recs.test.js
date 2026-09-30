@@ -181,6 +181,23 @@ test("buildPrompt lists the library and forbids owning books", () => {
   assert.match(prompt, /Never join two books/);
 });
 
+test("buildPrompt places consumed audiobooks in heavily weighted primary tier and library in secondary", () => {
+  const prompt = buildPrompt({
+    consumed: [
+      { title: "Foundation", author: "Isaac Asimov", progressPercent: 28 },
+    ],
+    queued: [
+      { title: "Dune", author: "Frank Herbert" },
+    ],
+  });
+  assert.match(prompt, /ACTIVELY CONSUMED \/ LISTENED AUDIOBOOKS \(HEAVIEST WEIGHT/);
+  assert.match(prompt, /SAVED IN LIBRARY \(SECONDARY TASTE CONTEXT\)/);
+  assert.match(prompt, /Foundation — Isaac Asimov \(Listened: 28% completed\)/);
+  assert.match(prompt, /Dune — Frank Herbert/);
+  assert.match(prompt, /Do not recommend anything already in the list/);
+});
+
+
 // -- checkSourceReachable -----------------------------------------------------
 
 test("checkSourceReachable reports an unreachable domain instead of throwing", async () => {
