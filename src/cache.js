@@ -33,6 +33,9 @@ class TTLCache {
   has(key) {
     return this.get(key) !== undefined;
   }
+  clear() {
+    this.m.clear();
+  }
 }
 
 // Wrap a function so at most `concurrency` calls run at once.

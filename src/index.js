@@ -18,6 +18,7 @@ const { TTLCache, pLimit, withTimeout } = require("./cache");
 const { makeAccess } = require("./access");
 const { getBookKey, sortInSeriesOrder, parseSeriesAndBook, cleanDisplayTitle, cleanEpisodeTitle, expandSeriesPacks } = require("./series");
 const { fetchSeriesMeta, fetchSeriesBooks, cleanSeriesQuery } = require("./series_meta");
+const { getCatalogBooks, startCatalogRefresher } = require("./catalogs_meta");
 const torbox = require("./torbox");
 const nuvio = require("./nuvio");
 
@@ -580,13 +581,46 @@ async function handleCatalog(req, res, extraRaw) {
       return best;
     });
   } else {
-    // Every other category is one plain search. The genre table lives in
-    // src/genres.js; an unknown name falls back to the default browse
-    // category, which matches the old behaviour.
-    searchQuery = g.query || "";
+    // Dynamic metadata-driven catalog fetching with scheduled regular refreshes.
+    // Pulls clean studio bestsellers directly from Audible / Open Library.
+    searchQuery = "";
     try {
-      items = await runSearch(cfg, searchQuery, 1);
-    } catch (_) {}
+      const genreToFetch = g ? g.name : genre;
+      const metaBooks = await getCatalogBooks(genreToFetch);
+      if (Array.isArray(metaBooks) && metaBooks.length > 0) {
+        const paged = metaBooks.slice(skip, skip + PAGE_SIZE);
+        const metas = paged.map((r) => {
+          const isSeries = !!r.isSeries;
+          const itemData = {
+            name: r.name,
+            author: r.author || undefined,
+            asin: r.asin || undefined,
+            seriesName: r.seriesName || undefined,
+            bookNumber: r.bookNumber != null ? r.bookNumber : undefined,
+            isSeries,
+            type: isSeries ? "series" : (req.params.type || "other"),
+          };
+          return {
+            id: encodeItemId(itemData),
+            type: isSeries ? "series" : (req.params.type || "other"),
+            name: prettyName(r.name),
+            poster: r.poster || undefined,
+            posterShape: "square",
+            description:
+              detailLine([
+                isSeries ? "📚 Series Collection" : null,
+                r.seriesName ? (r.bookNumber ? `${r.seriesName} #${r.bookNumber}` : r.seriesName) : null,
+                r.author ? `By ${r.author}` : null,
+              ]) || (r.description ? r.description.slice(0, 160) : undefined),
+          };
+        });
+        return res.json({ metas });
+      }
+    } catch (err) {
+      console.warn(`[catalog] metadata catalog fetch failed for "${genre}":`, err.message);
+    }
+    // Absolute constraint: No hardcoded placeholders or fallbacks.
+    return res.json({ metas: [] });
   }
 
   // Strict constraint: absolutely no hardcoded fallbacks or placeholder books.
@@ -860,8 +894,8 @@ async function resolveForItem(cfg, item) {
     } catch (_) {}
   }
 
-  // If this item represents a series episode without an infohash, dynamically search and resolve the best torrent
-  if (!item.infohash && (item.seriesName || item.bookNumber != null || item.isSeries)) {
+  // If this item represents a metadata catalog book or series episode without an infohash, dynamically search and resolve the best torrent
+  if (!item.infohash && item.name) {
     const bookTitle = cleanDisplayTitle(item.name || "");
     const bookQuery = `${bookTitle} ${item.author || ""}`.trim();
     try {
@@ -1167,4 +1201,5 @@ app.use((err, req, res, next) => {
 app.listen(PORT, () => {
   console.log(`BusTAudioBooks addon running on http://127.0.0.1:${PORT}`);
   console.log(`Open http://127.0.0.1:${PORT}/configure to generate your install link.`);
+  startCatalogRefresher();
 });
