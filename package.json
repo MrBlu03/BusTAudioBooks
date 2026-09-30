@@ -6,7 +6,8 @@
   "type": "commonjs",
   "scripts": {
     "start": "node src/index.js",
-    "test": "node --test"
+    "test": "node --test test/*.test.js",
+    "test:live": "node test/libex.live.js && node test/metadata.live.js"
   },
   "engines": {
     "node": ">=18"

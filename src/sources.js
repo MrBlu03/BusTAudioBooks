@@ -426,4 +426,5 @@ module.exports = {
   _parseTitleTags: parseTitleTags,
   _parseComicTags: parseComicTags,
   _searchJackett: searchJackett,
+  _searchAbb: searchAudiobookBay,
 };

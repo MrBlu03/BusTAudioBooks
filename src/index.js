@@ -7,6 +7,8 @@ try {
 const express = require("express");
 const crypto = require("crypto");
 const { manifest } = require("./manifest");
+const genres = require("./genres");
+const { resolveGenre } = genres;
 const { decodeConfig } = require("./config");
 const { searchAudiobooks, searchComics, qualityScore, comicQualityScore } = require("./sources");
 const { enrich } = require("./metadata");
@@ -56,6 +58,16 @@ app.use((req, res, next) => {
 // Build a short "Format · Bitrate · Size" line for descriptions/titles.
 function detailLine(parts) {
   return parts.filter(Boolean).join(" · ");
+}
+
+// Metadata providers report runtime in minutes; Audible shows "X hr Y min".
+function formatRuntime(minutes) {
+  const total = parseInt(minutes, 10);
+  if (!Number.isFinite(total) || total <= 0) return null;
+  const h = Math.floor(total / 60);
+  const m = total % 60;
+  if (!h) return `${m} min`;
+  return m ? `${h} hr ${m} min` : `${h} hr`;
 }
 
 // Format display titles cleanly for Stremio/Nuvio cards
@@ -305,13 +317,14 @@ async function handleCatalog(req, res, extraRaw) {
 
   let items = [];
   let searchQuery = query;
+  const g = resolveGenre(genre);
 
   if (query) {
     searchQuery = query;
     try {
       items = await runSearch(cfg, searchQuery, 1);
     } catch (_) {}
-  } else if (genre === "In Your TorBox") {
+  } else if (g && g.kind === genres.TORBOX) {
     searchQuery = "";
     try {
       const list = await torbox.getMyList(cfg.apiKey);
@@ -334,31 +347,13 @@ async function handleCatalog(req, res, extraRaw) {
         }));
       }
     } catch (_) {}
-  } else if (genre === "Star Wars") {
-    searchQuery = "Star Wars";
-    try {
-      items = await runSearch(cfg, searchQuery, 1);
-    } catch (_) {}
-  } else if (genre === "Popular Series") {
-    searchQuery = "series";
-    try {
-      items = await runSearch(cfg, searchQuery, 1);
-    } catch (_) {}
-  } else if (genre === "Science Fiction") {
-    searchQuery = "science fiction";
-    try {
-      items = await runSearch(cfg, searchQuery, 1);
-    } catch (_) {}
-  } else if (genre === "Fantasy & Magic") {
-    searchQuery = "fantasy";
-    try {
-      items = await runSearch(cfg, searchQuery, 1);
-    } catch (_) {}
   } else {
-    // Default browse: "Popular & Trending" (query = "")
-    searchQuery = "";
+    // Every other category is one plain search. The genre table lives in
+    // src/genres.js; an unknown name falls back to the default browse
+    // category, which matches the old behaviour.
+    searchQuery = g.query || "";
     try {
-      items = await runSearch(cfg, "", 1);
+      items = await runSearch(cfg, searchQuery, 1);
     } catch (_) {}
   }
 
@@ -561,24 +556,35 @@ async function handleMeta(req, res) {
       : Promise.resolve(false),
   ]);
 
+  // Runtime: prefer the real figure from the metadata provider over any
+  // "[128 kbps]" tag scraped out of the release filename.
+  const runtime = formatRuntime(meta.duration);
+
   const facts = detailLine([
     item.infohash
       ? (isCached ? "⚡ Instant on TorBox" : "Will download to TorBox on play")
       : "Adds to TorBox on play",
     item.format,
     item.bitrate,
+    runtime,
     torbox.formatBytes(item.size),
   ]);
 
   const descParts = [];
   if (meta.author) descParts.push(`By ${meta.author}`);
+  if (meta.narrator) descParts.push(`Narrated by ${meta.narrator}`);
   if (meta.description) descParts.push(meta.description);
   if (facts) descParts.push(facts);
   const description = descParts.filter(Boolean).join("\n\n");
 
-  const genres = Array.isArray(meta.genres) && meta.genres.length > 0
-    ? ["Audiobook", ...meta.genres]
-    : ["Audiobook"];
+  // Stremio shows `genres` as chips, and the series name is the single most
+  // useful chip for a series audiobook, so it leads.
+  const genres = [];
+  if (meta.series) {
+    genres.push(meta.seriesIndex ? `${meta.series} #${meta.seriesIndex}` : meta.series);
+  }
+  genres.push("Audiobook");
+  if (Array.isArray(meta.genres)) genres.push(...meta.genres);
 
   res.json({
     meta: {
@@ -591,7 +597,9 @@ async function handleMeta(req, res) {
       description,
       releaseInfo: meta.year || undefined,
       genres,
-      director: meta.author ? [meta.author] : undefined,
+      // Stremio has no narrator field; `director` is the closest slot, and it
+      // is what most audio addons abuse for this. `cast` keeps the author.
+      director: meta.narrator ? [meta.narrator] : undefined,
       cast: meta.author ? [meta.author] : undefined,
     },
   });

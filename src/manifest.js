@@ -1,10 +1,12 @@
 // src/manifest.js
 
+const { GENRE_OPTIONS } = require("./genres");
+
 const ID_PREFIX = "tbab:"; // "TorBox AudioBook" — our custom stream/meta ids
 
 const manifest = {
   id: "community.torbox.audiobooks",
-  version: "2.2.0",
+  version: "2.3.0",
   name: "BusTAudioBooks",
   description:
     "Search audiobooks and stream or download them through your TorBox account.",
@@ -20,14 +22,11 @@ const manifest = {
       extra: [
         {
           name: "genre",
-          options: [
-            "Popular & Trending",
-            "In Your TorBox",
-            "Popular Series",
-            "Science Fiction",
-            "Fantasy & Magic",
-            "Star Wars",
-          ],
+          // Populated from src/genres.js so the dropdown and the handler can
+          // never drift apart. Stremio renders this as a flat list, so the
+          // order there is the grouping: featured, fiction, non-fiction,
+          // kids & teens, franchises, authors.
+          options: GENRE_OPTIONS,
         },
         { name: "search" },
         { name: "skip" },

@@ -10,6 +10,7 @@
 
 const { TTLCache, withTimeout } = require("./cache");
 const { cleanDisplayTitle } = require("./series");
+const libex = require("./libex");
 
 const metaCache = new TTLCache(24 * 60 * 60 * 1000, 5000); // 24h
 
@@ -258,41 +259,37 @@ async function fromWikipedia(title, author) {
   }
 }
 
-async function fromAudiobookCovers(title, author) {
-  try {
-    const q = [title, author].filter(Boolean).join(" ");
-    const url = "https://audiobookcovers.com/api/search?q=" + encodeURIComponent(q);
-    const res = await fetch(url, { signal: AbortSignal.timeout(2500) });
-    if (!res.ok) return null;
-    const data = await res.json();
-    const first = data && data.results && data.results[0];
-    if (!first || !first.images) return null;
-    const img =
-      (first.images.jpeg && (first.images.jpeg["640"] || first.images.jpeg["320"])) ||
-      (first.images.webp && (first.images.webp["640"] || first.images.webp["320"])) ||
-      first.url;
-    return {
-      poster: img || null,
-      author: author || null,
-      description: null,
-      year: null,
-    };
-  } catch (_) {
-    return null;
-  }
-}
+// NOTE: audiobookcovers.com used to be a poster source here and has been
+// removed on purpose. Its /api/search returns 20 results for ANY input,
+// including invented titles, and the records carry no title/author/isbn — only
+// id, url, source, score and image URLs — so a match cannot be verified. Its
+// "score" is not a relevance signal either: a nonexistent title scores 0.339
+// while the real "Dune Frank Herbert" scores 0.305. Accepting results[0] meant
+// attaching a random cover to books we knew nothing about, which is worse than
+// showing no cover at all. Libex now covers the common cases with real Audible
+// art, and the remaining providers return verifiable matches.
 
 // Returns { poster, author, description, year, genres } — always resolves, never throws.
 async function enrich(raw, type = "audiobook") {
   const name = String(raw || "").toLowerCase().trim();
-  if (!name) return { poster: null, author: null, description: null, year: null, genres: [] };
+  if (!name) {
+    return {
+      poster: null, author: null, description: null, year: null, genres: [],
+      narrator: null, duration: null, series: null, seriesIndex: null,
+      publisher: null, asin: null, source: "none",
+    };
+  }
 
   const key = `${type}:${name}`;
   const hit = metaCache.get(key);
   if (hit !== undefined) return hit;
 
   const { title, author } = parseNameParts(raw, type);
-  let result = { poster: null, author: author || null, description: null, year: null, genres: [] };
+  let result = {
+    poster: null, author: author || null, description: null, year: null, genres: [],
+    narrator: null, duration: null, series: null, seriesIndex: null,
+    publisher: null, asin: null, source: "none",
+  };
 
   if (title.length >= 2 || raw.length >= 2) {
     if (type === "comic") {
@@ -301,37 +298,58 @@ async function enrich(raw, type = "audiobook") {
         withTimeout(fromOpenLibrary(title, author).catch(() => null), 2500, null),
       ]);
       const best = gb || ol;
-      if (best) result = best;
+      if (best) {
+        // Comics have no narrator/series fields; keep the shape identical to the
+        // audiobook branch so consumers never have to branch on `type`.
+        result = {
+          ...result,
+          ...best,
+          narrator: null, duration: null, series: null, seriesIndex: null,
+          publisher: null, asin: null, source: best === gb ? "googlebooks" : "openlibrary",
+        };
+      }
     } else {
-      // Audiobook lookup: query providers concurrently
-      const [it, gb, ol, ac, wiki] = await Promise.all([
+      // Audiobook lookup: query providers concurrently.
+      // libex leads because it is the only one backed by Audible data — it
+      // yields real cover art, series ordering, narrator and runtime. The rest
+      // fill whatever it cannot supply.
+      const [lx, it, gb, ol, wiki] = await Promise.all([
+        withTimeout(libex.lookup(title, author).catch(() => null), 2500, null),
         withTimeout(fromItunes(title, author, raw).catch(() => null), 2000, null),
         withTimeout(fromGoogleBooks(title, author).catch(() => null), 2000, null),
         withTimeout(fromOpenLibrary(title, author).catch(() => null), 2500, null),
-        withTimeout(fromAudiobookCovers(title, author).catch(() => null), 2000, null),
         withTimeout(fromWikipedia(title, author).catch(() => null), 2000, null),
       ]);
 
-      const candidates = [it, ac, gb, ol, wiki].filter(Boolean);
+      const candidates = [lx, it, gb, ol, wiki].filter(Boolean);
       const poster =
-        (ac && ac.poster) ||
+        (lx && lx.poster) ||
         (it && it.poster) ||
         (candidates.find((c) => c.poster) || {}).poster ||
         null;
       const authorFound =
-        (candidates.find((c) => c.author) || {}).author || author || null;
+        (lx && lx.author) ||
+        (candidates.find((c) => c.author) || {}).author ||
+        author ||
+        null;
       const description =
+        (lx && lx.description) ||
         (it && it.description) ||
         (ol && ol.description) ||
         (gb && gb.description) ||
         (wiki && wiki.description) ||
         null;
       const year =
+        (lx && lx.year) ||
         (it && it.year) ||
         (ol && ol.year) ||
         (gb && gb.year) ||
         null;
+      // Prefer Libex genres/tags: they are Audible's own categories ("Business
+      // & Money", "Mystery, Thriller & Suspense") rather than Open Library's
+      // loose subject headings.
       const genres =
+        (lx && lx.genres && lx.genres.length > 0 && lx.genres) ||
         (ol && ol.genres && ol.genres.length > 0 && ol.genres) ||
         (gb && gb.genres && gb.genres.length > 0 && gb.genres) ||
         (it && it.genres && it.genres.length > 0 && it.genres) ||
@@ -343,6 +361,15 @@ async function enrich(raw, type = "audiobook") {
         description,
         year,
         genres,
+        // Only Libex supplies these; absent elsewhere, so consumers must treat
+        // them as optional.
+        narrator: (lx && lx.narrator) || null,
+        duration: (lx && lx.duration) || null,
+        series: (lx && lx.series) || null,
+        seriesIndex: (lx && lx.seriesIndex) || null,
+        publisher: (lx && lx.publisher) || null,
+        asin: (lx && lx.asin) || null,
+        source: lx ? "libex" : "legacy",
       };
     }
   }
