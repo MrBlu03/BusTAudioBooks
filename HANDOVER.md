@@ -1,5 +1,5 @@
 # BusTAudioBooks — Handover Brief
-Commit `e8679ab`, tree clean, nothing pushed. Freshly built image verified running in the container.
+Commit `3e90f43`, tree clean, nothing pushed. Freshly built image verified running in the container.
 
 ## 1. Standing constraints — do not break these
 - **No GitHub work.** `AFK-Goblin` is not the user's account. Commits stay local on `main`. Never push, create a repo, or install `gh`.
@@ -10,12 +10,14 @@ Commit `e8679ab`, tree clean, nothing pushed. Freshly built image verified runni
 ## 2. Verified state
 | Check | Result |
 | --- | --- |
-| `npm test` | 154 pass, 0 fail |
+| `npm test` | 158 pass, 0 fail |
 | `npm run test:serve` | all checks passed |
 | Manifest | v2.5.1, 45 genre options, recs advertised |
 | Recs resolution | 14 of 14 |
 | Recs serving | 14 across 2 pages (`PAGE_SIZE = 12`) |
-| Recs series view | Series books default to series cards with episodes; standalone books remain single items |
+| Series Reading Orders | Dynamic dual orders verified for Foundation (1951..1993 Release vs Prelude..Earth Chronological) & Narnia; canonical 6 books for Dune without spinoff duplicates |
+| Search Prioritization | Searching a series or a book in a series (e.g. "Dune Messiah", "Second Foundation") prepends the full series card at #0 |
+| Search Deduplication | Dynamic deduplication collapses duplicate releases and duplicate collection packs cleanly |
 | Containers | `backend`, `jackett`, `flaresolverr`, `warp` — all Up |
 
 Genre rows sampled live: Horror / In Your TorBox / Popular Series / Science Fiction / Stephen King / Recommended For You all return n=12; recs page 2 returns n=2. Recs by source: 8 infohash, 0 magnet, 6 torrentUrl.
@@ -54,6 +56,7 @@ Genre rows sampled live: Horror / In Your TorBox / Popular Series / Science Fict
 - Nuvio credentials were pasted into chat; they live in gitignored `.env`. Rotation was recommended and needs confirming.
 
 ## 8. Commits (newest first)
+- `3e90f43` feat: fix series release orders, prioritize series in search, and deduplicate results
 - `e8679ab` feat: default recommended series books to series view with deduplication
 - `af80740` feat: implement dual chronological and release reading orders and daily recommendation refresh
 - `9cddef2` feat: implement dynamic metadata-driven catalogs with scheduled regular refreshes
