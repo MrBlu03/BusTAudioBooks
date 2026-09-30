@@ -8,3 +8,10 @@ npm-debug.log*
 # Indexers/ holds per-indexer credentials, log.txt is a 200KB rolling log.
 # None of this belongs in version control.
 selfhost/jackett-config/
+
+# Nuvio OAuth tokens (access + rotating refresh). Written by src/nuvio.js.
+.nuvio-auth.json
+
+# Generated recommendations cache. Rebuildable; do not commit.
+.recs.json
+.recs-state.json
