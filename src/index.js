@@ -626,7 +626,10 @@ async function handleCatalog(req, res, extraRaw) {
 
         if (isQueryingSeries) {
           const sAuthor = seriesCandidate.author || "";
-          const sPoster = (seriesCandidate.books[0] && seriesCandidate.books[0].poster) || undefined;
+          const sPoster =
+            seriesCandidate.collectionPoster ||
+            (seriesCandidate.books[0] && seriesCandidate.books[0].poster) ||
+            undefined;
           seriesCard = {
             id: encodeItemId({
               type: "series",
@@ -1000,7 +1003,10 @@ app.get("/:config/app/search", async (req, res) => {
 
         if (isQueryingSeries) {
           const sAuthor = seriesCandidate.author || "";
-          const sPoster = (seriesCandidate.books[0] && seriesCandidate.books[0].poster) || null;
+          const sPoster =
+            seriesCandidate.collectionPoster ||
+            (seriesCandidate.books[0] && seriesCandidate.books[0].poster) ||
+            null;
           seriesAppResult = {
             id: encodeItemId({
               type: "series",

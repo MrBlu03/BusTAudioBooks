@@ -96,3 +96,25 @@ test("fetchSeriesMeta matches internal files from parent torrent pack", async ()
   assert.equal(decodedEp2.parentInfohash, "1111222233334444555566667777888899990000");
   assert.equal(decodedEp2.targetFile, "02. Dune Messiah (1969).m4b");
 });
+
+test("each book has its own respective cover and series uses collection cover", async () => {
+  const meta = await fetchSeriesMeta("Dune", "Frank Herbert");
+  assert.ok(meta, "Expected series meta for Dune");
+  assert.ok(meta.poster, "Expected series master poster");
+
+  // Collection cover should be populated
+  assert.ok(meta.poster.includes("http"), "Expected URL for collection poster");
+
+  // Check each episode's respective cover
+  const ep1 = meta.videos.find((v) => v.episode === 1);
+  const ep2 = meta.videos.find((v) => v.episode === 2);
+  const ep3 = meta.videos.find((v) => v.episode === 3);
+
+  assert.ok(ep1 && ep1.thumbnail, "Expected thumbnail for Episode 1");
+  assert.ok(ep2 && ep2.thumbnail, "Expected thumbnail for Episode 2");
+  assert.ok(ep3 && ep3.thumbnail, "Expected thumbnail for Episode 3");
+
+  // Books 1, 2, and 3 must have distinct covers
+  assert.notEqual(ep1.thumbnail, ep2.thumbnail, "Book 1 and Book 2 must have distinct respective covers");
+  assert.notEqual(ep2.thumbnail, ep3.thumbnail, "Book 2 and Book 3 must have distinct respective covers");
+});

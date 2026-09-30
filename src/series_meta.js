@@ -34,7 +34,7 @@ async function fetchSeriesFromAudible(seriesName, author = "") {
   const params = new URLSearchParams({
     keywords: q,
     num_results: "30",
-    response_groups: "product_desc,series,contributors,product_attrs",
+    response_groups: "product_desc,series,contributors,product_attrs,media",
     products_sort_by: "Relevance",
   });
 
@@ -208,6 +208,61 @@ function fetchSeriesFromKnown(seriesName, author = "") {
 }
 
 /**
+ * Dynamically search for the official series / box set / collection cover art.
+ */
+async function findCollectionCover(seriesName, author = "") {
+  if (!seriesName) return null;
+  const cleanName = cleanSeriesQuery(seriesName);
+
+  // 1. Check Audible for a collection / box set / complete edition of this series
+  try {
+    const q = `${cleanName} collection`;
+    const params = new URLSearchParams({
+      keywords: q,
+      num_results: "8",
+      response_groups: "product_desc,media,contributors",
+      products_sort_by: "Relevance",
+    });
+    const res = await fetch(`${AUDIBLE_API}?${params.toString()}`, {
+      headers: { Accept: "application/json", "User-Agent": "bustaudio-addon/2.5" },
+      signal: AbortSignal.timeout(3000),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      const lower = cleanName.toLowerCase();
+      const hit = (data.products || []).find((p) => {
+        const title = String(p.title || "").toLowerCase();
+        const hasColWord = /collection|box\s*set|complete|saga|trilogy|set|chronicles/i.test(title);
+        const matchesSeries = title.includes(lower);
+        return hasColWord && matchesSeries && p.product_images && (p.product_images[500] || p.product_images[1024] || p.product_images[0]);
+      });
+      if (hit && hit.product_images) {
+        const img = hit.product_images[500] || hit.product_images[1024] || hit.product_images[0];
+        if (img) return cleanAudiblePoster(img);
+      }
+    }
+  } catch (_) {}
+
+  // 2. Fallback to Open Library for Boxed Set / Collection
+  try {
+    const olUrl = `https://openlibrary.org/search.json?q=${encodeURIComponent(`${cleanName} Boxed Set`)}&limit=5`;
+    const olRes = await fetch(olUrl, {
+      headers: { "User-Agent": "bustaudio-addon/2.5" },
+      signal: AbortSignal.timeout(3000),
+    });
+    if (olRes.ok) {
+      const olData = await olRes.json();
+      const hit = (olData.docs || []).find((d) => d.cover_i && /box|collection|trilogy|set|complete/i.test(d.title || ""));
+      if (hit && hit.cover_i) {
+        return `https://covers.openlibrary.org/b/id/${hit.cover_i}-L.jpg`;
+      }
+    }
+  } catch (_) {}
+
+  return null;
+}
+
+/**
  * Fetch series metadata and canonical book reading order dynamically.
  */
 async function fetchSeriesBooks(seriesName, author = "") {
@@ -217,20 +272,33 @@ async function fetchSeriesBooks(seriesName, author = "") {
   if (hit !== undefined) return hit;
 
   const result = await limit(async () => {
+    let seriesObj = null;
+
     // 1. Audible Catalog API (gold standard for audiobooks)
     try {
       const aud = await withTimeout(fetchSeriesFromAudible(seriesName, author), 3500, null);
-      if (aud && aud.books && aud.books.length > 0) return aud;
+      if (aud && aud.books && aud.books.length > 0) seriesObj = aud;
     } catch (_) {}
 
     // 2. Open Library
-    try {
-      const ol = await withTimeout(fetchSeriesFromOpenLibrary(seriesName, author), 3000, null);
-      if (ol && ol.books && ol.books.length > 0) return ol;
-    } catch (_) {}
+    if (!seriesObj) {
+      try {
+        const ol = await withTimeout(fetchSeriesFromOpenLibrary(seriesName, author), 3000, null);
+        if (ol && ol.books && ol.books.length > 0) seriesObj = ol;
+      } catch (_) {}
+    }
 
     // 3. Fallback known regex catalog
-    return fetchSeriesFromKnown(seriesName, author);
+    if (!seriesObj) {
+      seriesObj = fetchSeriesFromKnown(seriesName, author);
+    }
+
+    if (seriesObj) {
+      const colCover = await withTimeout(findCollectionCover(seriesObj.seriesName, seriesObj.author), 2500, null);
+      seriesObj.collectionPoster = colCover || (seriesObj.books[0] && seriesObj.books[0].poster) || null;
+    }
+
+    return seriesObj;
   })();
 
   seriesCache.set(cacheKey, result);
@@ -251,8 +319,9 @@ async function fetchSeriesMeta(seriesName, author = "", extraMeta = {}) {
     : `${cleanName} (Audiobook Series)`;
 
   const masterPoster =
-    (books[0] && books[0].poster) ||
     extraMeta.poster ||
+    (seriesData && seriesData.collectionPoster) ||
+    (books[0] && books[0].poster) ||
     undefined;
 
   // Build Stremio videos (Episodes representing Book 1, Book 2... in reading order)
@@ -326,6 +395,7 @@ async function fetchSeriesMeta(seriesName, author = "", extraMeta = {}) {
 module.exports = {
   fetchSeriesBooks,
   fetchSeriesMeta,
+  findCollectionCover,
   cleanSeriesQuery,
   _seriesCache: seriesCache,
 };
