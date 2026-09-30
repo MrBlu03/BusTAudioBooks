@@ -65,5 +65,10 @@ services:
       - INSTANT_ONLY=${INSTANT_ONLY:-}
       - TORBOX_API_KEY=${TORBOX_API_KEY:-}
       - COMIC_CATEGORIES=${COMIC_CATEGORIES:-7030}
+    volumes:
+      # The recommendations file is generated offline by `npm run recs:refresh`
+      # on the host and is gitignored, so it is not in the image. Mounted read-only
+      # so a refresh takes effect on the next request instead of needing a rebuild.
+      - ./.recs.json:/app/.recs.json:ro
     ports:
       - "7000:7000"

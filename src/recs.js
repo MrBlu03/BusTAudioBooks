@@ -74,13 +74,21 @@ function getRecs() {
               name: String(r.release.name || "").trim(),
               infohash: r.release.infohash || null,
               magnet: r.release.magnet || null,
+              // Jackett hands back a /dl/ endpoint with neither hash nor magnet and
+              // resolves it to a torrent at play time, so it is a third valid way
+              // for a release to be fetchable. Without this, every Jackett-only hit
+              // was filtered out here and the row lost a third of its entries.
+              torrentUrl: r.release.torrentUrl || null,
               size: Number(r.release.size) || 0,
               format: r.release.format || null,
               bitrate: r.release.bitrate || null,
             },
           }))
-          // A release with neither a hash nor a magnet cannot be streamed.
-          .filter((r) => r.title.length >= 2 && (r.release.infohash || r.release.magnet)),
+          // Needs some way to fetch the file. A release with no hash, no magnet and
+          // no download link cannot be streamed.
+          .filter(
+            (r) => r.title.length >= 2 && (r.release.infohash || r.release.magnet || r.release.torrentUrl)
+          ),
       }
     : { generatedAt: null, model: null, basedOnCount: null, items: [] };
 

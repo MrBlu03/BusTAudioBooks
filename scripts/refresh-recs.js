@@ -395,6 +395,94 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  *
  * @returns {Promise<{ok: boolean, detail: string}>}
  */
+/**
+ * Probe the path resolution actually uses, rather than the direct ABB domain.
+ *
+ * This exists because checking `ABB_DOMAIN` alone was wrong. `searchAudiobooks`
+ * fans out to direct AudiobookBay *and* Jackett and merges whatever survives
+ * `allSettled`, so a dead mirror does not stop resolution — Jackett still
+ * answers. Gating on the mirror meant a perfectly working Jackett setup was
+ * reported as "index unreachable" and exited before trying a single lookup.
+ * The only question worth asking is whether a search returns anything, so ask
+ * that, using the same call the resolver makes.
+ *
+ * @returns {Promise<{ok: boolean, hits: number, detail: string}>}
+ */
+async function probeSearchPath(cfg) {
+  // Plain, unambiguous, and present in any usable audiobook index. Probed
+  // through the real search function rather than a raw HTTP GET, because that
+  // is the only signal that predicts whether resolution will succeed.
+  const probes = ["A Game of Thrones", "The Hobbit"];
+  const started = Date.now();
+  for (const q of probes) {
+    try {
+      const hits = await sources.searchAudiobooks(cfg, q, 1);
+      if (hits && hits.length) {
+        return {
+          ok: true,
+          hits: hits.length,
+          detail: `search path answered "${q}" with ${hits.length} hit(s) in ${Date.now() - started}ms`,
+        };
+      }
+    } catch (_) {
+      // Try the next probe.
+    }
+  }
+  return {
+    ok: false,
+    hits: 0,
+    detail: `no index answered a probe search after ${Date.now() - started}ms`,
+  };
+}
+
+/**
+ * Work out a Jackett URL that is reachable from *this* process.
+ *
+ * The backend container talks to Jackett as `http://jackett:9117`, which is a
+ * compose-network name and does not resolve on the host where this script runs.
+ * Jackett is published on 127.0.0.1:9117 for exactly this, so prefer whatever
+ * is actually reachable instead of demanding the .env value be edited — the
+ * container still needs the internal name, so changing .env is not the fix.
+ *
+ * @returns {Promise<string|undefined>} undefined means "no override needed".
+ */
+async function jackettUrlForHost() {
+  const raw = (process.env.JACKETT_URL || "").trim();
+  if (!raw) return undefined;
+
+  const host = raw.replace(/^https?:\/\//, "").split(":")[0];
+  // Loopback, a raw IP, or an explicit port is already usable as written.
+  if (host === "localhost" || host === "127.0.0.1" || host === "::1" || /^\d+\.\d+\.\d+\.\d+$/.test(host)) {
+    return undefined;
+  }
+
+  const resolves = await new Promise((done) => {
+    require("dns").lookup(host, (err) => done(!err));
+  });
+  if (resolves) return undefined;
+
+  const fallback = "http://127.0.0.1:9117";
+  const reachable = await new Promise((done) => {
+    const req = require("http").request(`${fallback}/api/v2.0/indexers?apikey=x`, { timeout: 3000 }, (r) => {
+      r.resume();
+      done(true);
+    });
+    req.on("error", () => done(false));
+    req.on("timeout", () => {
+      req.destroy();
+      done(false);
+    });
+    req.end();
+  });
+
+  if (reachable) {
+    console.log(`Jackett: ${raw} is container-internal, using the published ${fallback} instead.`);
+    return fallback;
+  }
+  console.log(`Jackett: ${raw} does not resolve here and ${fallback} is not answering either.`);
+  return undefined;
+}
+
 async function checkSourceReachable(domain) {
   const started = Date.now();
   try {
@@ -456,12 +544,23 @@ async function resolveRecs(recs, cfg) {
       continue;
     }
 
+    // A release is only playable if it has *some* torrent identity. ABB gives a
+    // magnet, but Jackett returns a /dl/ endpoint with neither hash nor magnet and
+    // expects to be resolved at play time — dropping torrentUrl here turned those
+    // hits into dead tiles that the serving path then discarded, silently losing
+    // a third of the row.
+    if (!hit.infohash && !hit.magnet && !hit.torrentUrl) {
+      console.log(`  - ${rec.title} (matched, but no way to fetch it)`);
+      continue;
+    }
+
     resolved.push({
       ...rec,
       release: {
         name: hit.name,
         infohash: hit.infohash || null,
         magnet: hit.magnet || null,
+        torrentUrl: hit.torrentUrl || null,
         size: hit.size || 0,
         format: hit.format || null,
         bitrate: hit.bitrate || null,
@@ -541,6 +640,19 @@ async function main() {
   }
 
   if (!force && existing && state && state.hash === hash && Array.isArray(existing.items)) {
+    const stored = Array.isArray(existing.suggestions) ? existing.suggestions : [];
+    if (existing.items.length === 0 && stored.length) {
+      // The previous run generated fine but resolved nothing. That is a source
+      // problem, not a library problem, so the hash gate must not swallow it:
+      // re-resolve the suggestions we already paid for instead of returning 0
+      // forever, and still do not call the model.
+      console.log(
+        `Library unchanged since ${existing.generatedAt}, but nothing resolved last time.`
+      );
+      console.log(`Retrying resolution of ${stored.length} stored suggestion(s) — model not called.`);
+      await writeResolved(existing, stored, books, profileIndex, hash, existing.generatedAt);
+      return;
+    }
     console.log(
       `Library unchanged since ${existing.generatedAt}. Keeping ${existing.items.length} recommendations — model not called.`
     );
@@ -577,38 +689,69 @@ async function main() {
     process.exit(1);
   }
 
-  const abbDomain = process.env.ABB_DOMAIN || "audiobookbay.lu";
   console.log(`\n${recs.length} recommendations in ${secs}s.`);
 
+  await writeResolved(recs, recs, books, profileIndex, hash);
+}
+
+/**
+ * Resolve suggestions to playable releases, write the result, and print a summary.
+ * Shared by the generate path and the re-resolve path so both behave identically.
+ */
+async function writeResolved(suggestions, recs, books, profileIndex, hash, generatedAt) {
+  const abbDomain = process.env.ABB_DOMAIN || "audiobookbay.lu";
+  const jackettUrl = await jackettUrlForHost();
+  const cfg = jackettUrl ? { abbDomain, jackettUrl } : { abbDomain };
+
   // Check the source before spending a minute on searches that cannot succeed.
+  // Note the probe goes through the search path, not the mirror: a dead
+  // audiobookbay.* is survivable when Jackett is configured, and reporting that
+  // as a dead index was a false negative that silently emptied the row.
+  const probe = await probeSearchPath(cfg);
   const reach = await checkSourceReachable(abbDomain);
-  if (!reach.ok) {
-    console.error(`\nCannot resolve: ${reach.detail}`);
+  if (!probe.ok) {
+    console.error(`\nCannot resolve: ${probe.detail}`);
+    console.error(`Direct mirror check: ${reach.detail}`);
     console.error(
       "Suggestions were generated but no release could be looked up. This is the\n" +
         "index being unreachable, not a coverage problem — ABB mirrors change domain\n" +
-        "often. Update ABB_DOMAIN in .env to a working mirror and run this again."
+        "often, and Jackett needs a working indexer of its own. Fix ABB_DOMAIN or the\n" +
+        "Jackett indexer config in .env, then run this again."
     );
     process.exit(1);
   }
-  console.log(`${reach.detail}. Resolving to playable releases...`);
+  if (!reach.ok) {
+    // Not fatal: resolution runs through searchAudiobooks, which merges Jackett
+    // results in alongside whatever the mirror returns.
+    console.log(`Note: direct mirror is down (${reach.detail}).`);
+    console.log(`Continuing — ${probe.detail}.`);
+  } else {
+    console.log(`${reach.detail}. Resolving to playable releases...`);
+  }
 
-  const resolved = await resolveRecs(recs, { abbDomain });
+  const resolved = await resolveRecs(recs, cfg);
 
   const payload = {
-    generatedAt: new Date().toISOString(),
+    // Preserve the original generation time when only re-resolving, so the
+    // "generated at" in the UI still means when the model actually ran.
+    generatedAt: generatedAt || new Date().toISOString(),
+    resolvedAt: new Date().toISOString(),
     profileIndex,
     model: MODEL,
     basedOnHash: hash,
     basedOnCount: books.length,
     count: resolved.length,
-    suggested: recs.length,
+    suggested: suggestions.length,
     items: resolved,
+    // The unresolved suggestions are kept so a failed resolution can be retried
+    // later without calling the model again. Generation and resolution fail for
+    // unrelated reasons — a dead index should not cost a second round of tokens.
+    suggestions,
   };
   fs.writeFileSync(RECS_FILE, JSON.stringify(payload, null, 2));
   fs.writeFileSync(STATE_FILE, JSON.stringify({ hash, count: books.length, at: payload.generatedAt }, null, 2));
 
-  console.log(`\n${resolved.length} of ${recs.length} are actually in the index -> ${path.basename(RECS_FILE)}\n`);
+  console.log(`\n${resolved.length} of ${suggestions.length} are actually in the index -> ${path.basename(RECS_FILE)}\n`);
   resolved.forEach((r, i) =>
     console.log(`  ${String(i + 1).padStart(2)}. ${r.title}${r.author ? " — " + r.author : ""}\n      ${r.release.name}`)
   );
@@ -617,7 +760,8 @@ async function main() {
     console.log(
       "\nNothing resolved. Either the index does not carry these titles, or the\n" +
         "source was unreachable during resolution (an unreachable source returns no\n" +
-        "results, which looks the same as a missing book). Try again later, a\n" +
+        "results, which looks the same as a missing book). Re-run this command later\n" +
+        "to retry — the suggestions are kept, so no tokens are spent. Or try a\n" +
         "different RECS_MODEL, or raise RECS_COUNT so more candidates are tried."
     );
   }
@@ -632,6 +776,8 @@ module.exports = {
   buildPrompt,
   runModel,
   checkSourceReachable,
+  probeSearchPath,
+  jackettUrlForHost,
 };
 
 if (require.main === module) {
