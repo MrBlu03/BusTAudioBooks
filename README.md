@@ -1,183 +1,166 @@
-# BusTAudio — Stremio Audiobook Addon
+# 🎧 BusTAudio — Premium Stremio Audiobook & Comics Addon
 
-A Stremio addon that searches for audiobooks and resolves **playable / downloadable
-links through your TorBox account**. Each user installs it with their own TorBox
-API key baked into the install URL, so there's no shared server state and no
-database.
+A powerful, high-performance Stremio addon that finds audiobooks and resolves **direct playable / downloadable streams through your TorBox account**. 
 
-## How it works
+Every user installs the addon with their own TorBox API key embedded into the install URL, ensuring zero shared server state, private quota usage, and no centralized database.
+
+---
+
+## ⚡ Key Features
+
+- **⚡ Instant vs Uncached Detection**: Automatically queries TorBox for cached torrents in real time and floats them to the top tagged with `⚡ Instant`.
+- **📚 Smart Series Cataloging & Dual-Order Seasons**:
+  - Automatically identifies book series and groups books together under a clean series overview.
+  - **Season 1 (Release / Publication Order)**: Experience the series in the sequence the author published them.
+  - **Season 2 (Chronological Story Order)**: Follow the in-universe narrative timeline.
+  - Eliminates duplicate torrent releases and groups multiple parts/files seamlessly.
+- **🎨 Rich Metadata & Chapters**: Enriches titles with high-resolution cover art, comprehensive synopses, author bios, genres, and duration via Audnexus, Google Books, and Open Library.
+- **🎯 Intelligent Search**: Built-in query normalization (e.g., expanding `starwars` or `spiderman`), typo tolerance, fuzzy title matching, and noise stripping.
+- **🌟 Personalized Recommendations (Nuvio Integration)**:
+  - Synchronizes with your Nuvio reading library.
+  - Automatically generates a dynamic "Recommended For You" catalog with smart series fallbacks.
+- **📱 Companion Mobile App & Comics Reader**:
+  - Fully compatible with the [BusTAudioBooks Mobile App](https://github.com/AFK-Goblin/BusTAudioBooks-App).
+  - Background offline downloads, lock-screen controls, sleep timer, persistent playback speed, and chapter seeking.
+  - Dedicated **Comics** tab supporting `.cbz`, `.cbr`, and `.pdf` archives with a built-in vertical reader.
+- **🔒 Privacy & Security by Design**:
+  - Zero hardcoded credentials or keys in version control.
+  - TorBox API keys live exclusively in each user's personal install URL.
+  - Optional access token gate (`ACCESS_TOKENS`) for private family/friend hosting.
+
+---
+
+## 🏗️ Architecture
 
 ```
-Stremio  ──search──▶  addon  ──▶  AudiobookBay (or Jackett)  ──▶  list of torrents
-                          └──▶  TorBox checkcached (batch)   ──▶  ⚡ instant ones first
-                          └──▶  Open Library                 ──▶  covers + authors
-Stremio  ──stream──▶  addon  ──▶  TorBox:  checkcached → createtorrent → mylist → requestdl
-                                   └──▶  direct HTTPS link per audio file
+Stremio / Mobile App  ──▶  BusTAudio Addon (Port 7000)
+                               │
+       ┌───────────────────────┼───────────────────────┐
+       ▼                       ▼                       ▼
+ Jackett / ABB Scraping   TorBox API Engine     Audnexus / OpenLibrary
+(Search torrent listings) (Cache check & DLs)   (Metadata & cover art)
+       │                       │
+ Cloudflare WARP +        Playable HTTPS
+ FlareSolverr Proxy       Streams & Chapters
 ```
 
-The link `requestdl` returns is a plain HTTPS URL — Stremio plays it, and you can
-also paste it into a browser, `curl`, `aria2`, IDM, etc. to **download** the file.
+---
 
-TorBox endpoints used (base `https://api.torbox.app/v1/api`):
-`/torrents/checkcached`, `/torrents/createtorrent`, `/torrents/mylist`,
-`/torrents/requestdl`.
+## 🚀 Quick Start (Self-Hosting with Docker)
 
-## Features
+The easiest and recommended way to host BusTAudio is using Docker Compose. The stack bundles:
+1. **`bustaudio-backend`**: The Node.js addon server (port 7000).
+2. **`bustaudio-jackett`**: Pre-configured torrent search indexer (port 9117).
+3. **`bustaudio-flaresolverr`**: Bypasses Cloudflare bot detection seamlessly.
+4. **`bustaudio-warp`**: Cloudflare WARP SOCKS5 proxy ensuring ISP blocks never stop searches.
 
-- **Instant-vs-not labeling.** Before showing results, the addon asks TorBox
-  which torrents are already cached (one batched call) and floats those to the
-  top with an `⚡ Instant` tag — so you're not picking blindly.
-- **Instant-only mode (optional).** Tick it on the configure page (or set
-  `INSTANT_ONLY=1`) to hide anything TorBox can't stream immediately, so every
-  result plays with no wait.
-- **Quality-aware sorting.** Within cached/uncached groups, results are ranked by
-  a rough quality score (bitrate, container, size) so cleaner rips surface first.
-- **Right player for the format.** Browser-playable files (mp3/m4a/…) play inline;
-  m4b/flac/etc. are flagged `notWebReady` so Stremio routes them to an external
-  player instead of failing quietly.
-- **Real cover art + author** from Open Library (best-effort, cached, never blocks).
-- **Format / bitrate / size** parsed from AudiobookBay and shown on tiles, the
-  detail page, and each stream.
-- **Fast + resilient.** Search pages, detail pages, cover lookups, cache-status
-  checks, and resolved playable streams are all memoized with TTLs; outbound
-  requests are concurrency-limited; and scrapes retry with backoff. Re-opening a
-  book serves cached links instantly without re-hitting the API.
-- **Search pagination** (Stremio's infinite scroll / `skip`).
-- **Health route:** `GET /<config>/health` reports whether your TorBox key is
-  valid, which sources are configured, and whether instant-only is on.
-- **Tests + CI.** `npm test` runs the parsing/caching/id/quality suite (no
-  network); a GitHub Actions workflow runs it on Node 18/20/22.
-
-## 📱 Looking for a better Mobile Experience? 
-
-While Stremio is fantastic for TV screens, its built-in player isn't natively designed for long-form audiobooks on mobile devices (handling things like precise sleep timers, background lock-screen controls, or offline downloads). 
-
-If you plan to listen on your phone, it is highly recommended to use the **BusTAudioBooks Mobile App** instead!
-
-### Why use the Companion App?
-*   📥 **True Offline Downloads:** Native background downloading that survives screen-locks and app kills so you can listen completely offline.
-*   🎧 **Dedicated Audiobook Player:** Built-in chapter menus, persistent speed controls, custom skip intervals, and bookmarks.
-*   ⏳ **Sleep Timer:** A dedicated sleep timer (by minutes or end-of-chapter) that keeps working perfectly in the background.
-*   🩹 **Self-Healing Streams:** Expired TorBox links are silently re-resolved behind the scenes so your playback never randomly stops mid-sentence.
-*   🔒 **Zero Extra Configuration:** It is completely plug-and-play. You just open the app and paste the exact same Stremio `manifest.json` install link you already generated. 
-
-👉 **Check out the project and download the latest Android APK here:** [BusTAudioBooks Mobile Repository](https://github.com/AFK-Goblin/BusTAudioBooks-App)
-
-
-### Environment variables
-
-| Var | Purpose |
-|-----|---------|
-| `PORT` | Listen port (default 7000) |
-| `ABB_DOMAIN` | Default AudiobookBay domain if a user doesn't set one per-install |
-| `INSTANT_ONLY` | Set to `1` to force instant-only for every install on this instance |
-| `COMIC_CATEGORIES` | Torznab categories for the app's Comics search (default `7030`) |
-
-## 📚 Comics (mobile app only)
-
-The [BusTAudioBooks Mobile App](https://github.com/AFK-Goblin/BusTAudioBooks-App)
-also gets a **Comics** tab powered by this same server. It's app-only — nothing
-changes in Stremio.
-
-- **Search** rides on your Jackett/Prowlarr (Torznab category `7030` =
-  Books/Comics), so add an indexer that carries comics/manga to enable it.
-  AudiobookBay is not used for comics.
-- The app API takes `GET /<config>/app/search?q=...&type=comic`; item ids carry
-  the content type, so `/app/streams/<id>` needs no extra parameter.
-- **Resolution** is the same TorBox flow, but filtered to comic files:
-  `.cbz .cbr .cb7 .cbt .pdf` archives plus loose page images
-  (`.jpg .png .webp .avif`).
-- The app reads **CBZ** archives and loose-image torrents in its built-in
-  vertical reader; CBR/PDF are download-only (open them with a reader of your
-  choice).
-
-## Setup
+### Step 1: Clone and Start
 
 ```bash
-npm install
-npm start
+git clone git@github.com:MrBlu03/BusTAudioBooks.git
+cd BusTAudioBooks
+
+# Copy example environment configuration (optional)
+cp .env.example .env
+
+# Spin up all containers in the background
+docker compose up -d
 ```
 
-Then open **http://127.0.0.1:7000/configure**, paste:
+### Step 2: Enable the AudiobookBay Indexer (One-time, ~30 seconds)
 
-- **TorBox API key** — from torbox.app → Settings → API (required)
-- **AudiobookBay domain** — the current working ABB domain, e.g. `audiobookbay.lu`
-  (this enables search with **no extra software** to run)
+1. Open **`http://localhost:9117`** in your browser (Jackett web UI).
+2. Click **+ Add indexer**.
+3. Search for `audiobookbay`, and click the blue **+** icon next to it.
+4. *Done!* FlareSolverr and the backend will automatically route queries through Jackett.
 
-Click *Generate install link* → *Install in Stremio*.
+---
 
-## Where it searches
+## ⚙️ How to Configure & Install
 
-Two built-in sources, in `src/sources.js`:
+### 1. Get your TorBox API Key
+1. Go to [torbox.app](https://torbox.app) and log into your account.
+2. Navigate to **Settings → API** and copy your **API Key**.
 
-1. **AudiobookBay (default).** Scraped directly by the addon — no Jackett or
-   Prowlarr process needed. Just set the current ABB domain on the configure page
-   (or the `ABB_DOMAIN` env var).
-2. **Jackett / Prowlarr (optional).** Only used if you fill in its URL + key under
-   "Advanced" on the configure page.
+### 2. Configure the Addon
+1. Open **`http://localhost:7000/configure`** (or your server's IP address, e.g. `http://192.168.1.50:7000/configure`).
+2. Paste your **TorBox API Key**.
+3. (Optional) Customize settings:
+   - **Instant only**: Check this if you only ever want immediately streamable results.
+   - **Access Token**: Enter the secret token if the instance is private.
+4. Click **Generate Install Link**.
 
-Both return `{ name, infohash, magnet, size, seeders, tracker }`, so adding more
-sources is just another function merged into `searchAudiobooks()`.
+### 3. Add to Stremio
+- **Desktop / Web**: Click **Install in Stremio** or copy the generated `stremio://...` link and paste it into the search bar in Stremio.
+- **Mobile / Android TV**: Copy the HTTPS manifest link (e.g. `http://<ip>:7000/<config>/manifest.json`), open Stremio Settings → Addons → Paste addon URL, and click Add.
 
-### Caveats for the ABB scraper
+### 4. Add to the BusTAudioBooks Mobile App
+1. Download and install the latest APK from the [BusTAudioBooks App Repository](https://github.com/AFK-Goblin/BusTAudioBooks-App).
+2. On first launch, paste the manifest URL generated on your configure page.
+3. Tap **Connect** and enjoy offline downloads, sleep timer, and lock-screen audio controls!
 
-- **Domain rotation.** ABB changes domains fairly often. When search goes quiet,
-  update the domain on the configure page — no redeploy needed if you used the
-  per-install field; one env-var change if you baked it into the host.
-- **Cloudflare.** If ABB is behind a Cloudflare challenge, a plain fetch can't get
-  through; the addon detects this and logs it. You'd then need a FlareSolverr-style
-  solver or a different domain.
-- **Selector drift.** Parsing is regex-based against ABB's known layout. If they
-  restructure the HTML, tweak `parseAbbList` / `parseAbbDetail` in `sources.js`.
-  (For sturdier scraping you can swap in `cheerio` — it's a one-function change.)
+---
 
-## Run it off your machine (recommended)
+## 🌟 Setting Up Personal Recommendations (Nuvio)
 
-So that *nothing* runs locally — not Jackett, not even the addon — deploy the
-addon to a host and just paste its HTTPS URL into Stremio. Stremio requires HTTPS
-for remote addons, which all these provide for free:
+BusTAudio can automatically sync your reading history and generate AI-driven audiobook recommendations:
 
-- **Render / Railway / Fly.io / Koyeb** — connect this repo (or push the included
-  `Dockerfile`), and you get a URL like `https://yourapp.onrender.com`. Open
-  `…/configure` there, generate your install link, install. Set `ABB_DOMAIN` as an
-  env var on the host so you can update it without redeploying code.
-- **Any VPS** — `docker build -t torbox-audiobooks . && docker run -p 7000:7000 -e ABB_DOMAIN=audiobookbay.lu torbox-audiobooks`,
-  then put it behind HTTPS (Caddy / Nginx / Cloudflare Tunnel).
+1. In `.env`, provide your Nuvio account details:
+   ```env
+   NUVIO_EMAIL=your-email@example.com
+   NUVIO_PASSWORD=your-password
+   NUVIO_PROFILE_ID=1
+   ```
+2. Run the recommendation builder:
+   ```bash
+   npm run recs:refresh
+   ```
+3. To keep recommendations fresh automatically, run the daily scheduler:
+   ```bash
+   npm run recs:daily
+   ```
 
-Because each user's TorBox key lives inside their own install URL, a single
-deployed instance can safely serve just you (or several people) without sharing
-credentials.
+---
 
-## Uncached torrents
+## 🛠️ Environment Variables Reference
 
-If a torrent isn't already cached on TorBox, the addon adds it (TorBox starts
-pulling it from peers) and the stream shows a `⏳ Downloading…` entry. Re-open the
-title after a bit and the playable file links appear. If you only ever want
-instant results, you can gate on `checkCached()` in `torbox.js` and skip uncached
-items.
+| Variable | Default | Description |
+|---|---|---|
+| `PORT` | `7000` | Port the addon HTTP server listens on |
+| `JACKETT_URL` | `http://jackett:9117` | URL of your Jackett / Prowlarr indexer |
+| `JACKETT_API_KEY` | *(empty)* | Jackett API key (auto-loaded when using docker-compose) |
+| `ABB_DOMAIN` | `audiobookbay.lu` | Fallback domain for direct AudiobookBay scraping |
+| `INSTANT_ONLY` | `0` | Set to `1` to only return cached/instantly playable streams |
+| `ACCESS_TOKENS` | *(empty)* | Comma-separated list of access tokens required to install |
+| `COMIC_CATEGORIES` | `7030` | Torznab category IDs for Comics searches (mobile app) |
+| `NUVIO_EMAIL` | *(empty)* | Email for Nuvio library recommendation synchronization |
+| `NUVIO_PASSWORD` | *(empty)* | Password for Nuvio synchronization |
+| `NUVIO_PROFILE_ID` | `1` | Profile number to sync recommendations for |
 
-## Notes
+---
 
-- **Custom content type.** Audiobooks use a custom `audiobook` type. Stremio shows
-  it under Discover and its player handles audio. Rendering of custom types can
-  vary slightly between Stremio clients.
-- **Multi-file audiobooks** (a folder of MP3 chapters) appear as one stream per
-  file, sorted naturally. Single-file `.m4b` shows as one stream.
-- **Hosting.** For use beyond your own machine, deploy behind HTTPS (Stremio
-  requires HTTPS for remote addons). Any Node host works; set `PORT` via env.
-- **Content.** Point your indexer at sources you're entitled to use — e.g.
-  public-domain audiobooks (LibriVox and similar) are freely shareable.
+## 🧪 Testing & Verification
 
-## Files
+BusTAudio comes with a complete suite of unit and integration tests:
 
-| File | Purpose |
-|------|---------|
-| `src/index.js` | Express server, configure page, manifest/catalog/meta/stream/health routes |
-| `src/torbox.js` | TorBox API client + `resolveStreams()` flow + batch cache checks |
-| `src/sources.js` | Search sources: AudiobookBay scraper (default) + optional Jackett |
-| `src/metadata.js` | Cover art + author enrichment via Open Library (cached) |
-| `src/cache.js` | TTL/LRU cache, concurrency limiter, timeout helper |
-| `src/itemid.js` | Encode/decode the payload carried in item ids |
-| `src/manifest.js` | Addon manifest (custom `audiobook` type, search catalog) |
-| `src/config.js` | Packs the API key into the install URL |
-| `test/parse.test.js` | Unit tests for the pure logic |
+```bash
+# Run unit tests (parsing, series ordering, deduplication, search normalization)
+npm test
+
+# Test recommendation serving and catalog metadata
+npm run test:serve
+```
+
+---
+
+## 🔒 Security & Privacy Notice
+
+- **Never commit `.env` or personal tokens**: All credential files, indexer configs, and session caches are ignored by `.gitignore`.
+- **TorBox keys remain private**: Keys are passed through the encrypted URL path between the user's client and the backend server.
+- **Sharing with friends**: If hosting publicly, configure `ACCESS_TOKENS=friend1,friend2` so strangers cannot access your instance. Each friend enters their own TorBox key during setup.
+
+---
+
+## 📄 License
+
+MIT License. See [LICENSE](LICENSE) for details.
