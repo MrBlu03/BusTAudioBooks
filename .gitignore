@@ -2,3 +2,9 @@ node_modules/
 npm-debug.log*
 .env
 .DS_Store
+
+# Jackett runtime state — mounted into the container at /config.
+# ServerConfig.json holds a live API key, DataProtection/ holds signing keys,
+# Indexers/ holds per-indexer credentials, log.txt is a 200KB rolling log.
+# None of this belongs in version control.
+selfhost/jackett-config/

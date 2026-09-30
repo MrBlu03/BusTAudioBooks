@@ -4,24 +4,32 @@ const ID_PREFIX = "tbab:"; // "TorBox AudioBook" — our custom stream/meta ids
 
 const manifest = {
   id: "community.torbox.audiobooks",
-  version: "2.0.0",
+  version: "2.2.0",
   name: "BusTAudioBooks",
   description:
     "Search audiobooks and stream or download them through your TorBox account.",
-  // "audiobook" is a custom content type. Stremio shows it under Discover and
-  // the player handles audio files. (Native types are movie/series/tv/channel.)
-  types: ["audiobook"],
+  types: ["audiobook", "other"],
   // Only ids we mint get routed to this addon's meta/stream handlers.
   idPrefixes: [ID_PREFIX],
   resources: ["catalog", "meta", "stream"],
   catalogs: [
     {
       type: "audiobook",
-      id: "torbox-audiobooks-search",
-      name: "TorBox Audiobooks",
-      // Search-only catalog: Stremio shows a search box, no "popular" feed needed.
+      id: "torbox-audiobooks",
+      name: "Audiobooks",
       extra: [
-        { name: "search", isRequired: true },
+        {
+          name: "genre",
+          options: [
+            "Popular & Trending",
+            "In Your TorBox",
+            "Popular Series",
+            "Science Fiction",
+            "Fantasy & Magic",
+            "Star Wars",
+          ],
+        },
+        { name: "search" },
         { name: "skip" },
       ],
     },

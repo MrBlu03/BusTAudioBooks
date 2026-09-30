@@ -79,16 +79,20 @@ function magnetFromInfohash(infohash, name) {
   return `magnet:?xt=urn:btih:${infohash}${dn}${tr}`;
 }
 
-async function tbFetch(path, { apiKey, method = "GET", body, query } = {}) {
+async function tbFetch(path, { apiKey, method = "GET", body, query, headers } = {}) {
   const url = new URL(API_BASE + path);
   if (query) {
     for (const [k, v] of Object.entries(query)) {
       if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
     }
   }
+  const reqHeaders = {
+    ...(apiKey ? authHeaders(apiKey) : {}),
+    ...(headers || {}),
+  };
   const res = await fetch(url, {
     method,
-    headers: apiKey ? authHeaders(apiKey) : undefined,
+    headers: Object.keys(reqHeaders).length > 0 ? reqHeaders : undefined,
     body,
   });
   let json;
@@ -247,6 +251,21 @@ async function findTorrentByHash(apiKey, hash) {
   return list.find((t) => (t.hash || "").toLowerCase() === target) || null;
 }
 
+// Control an existing torrent on TorBox (e.g. operation: 'delete', 'resume', 'reannounce', 'stop_seeding').
+async function controlTorrent(apiKey, torrentId, operation) {
+  try {
+    const json = await tbFetch("/torrents/controltorrent", {
+      apiKey,
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ torrent_id: torrentId, operation }),
+    });
+    return !!(json && json.success);
+  } catch (_) {
+    return false;
+  }
+}
+
 // Get a direct, downloadable link for one file inside a torrent.
 // NOTE: requestdl authenticates via the `token` query param (not the Bearer
 // header) precisely so the resulting link is usable as a plain URL.
@@ -323,10 +342,42 @@ async function resolveStreams(apiKey, { magnet, infohash, name, torrentUrl, inst
   // We now have the real hash from TorBox (needed for bingeGroup / dedupe).
   hash = (torrent.hash || hash || "").toLowerCase();
 
-  const filesReady =
+  let filesReady =
     torrent.download_present === true ||
     torrent.download_finished === true ||
     (Array.isArray(torrent.files) && torrent.files.length > 0);
+
+  // Auto-recovery: If the item in the user's account is stalled / not ready,
+  // but TorBox has it cached globally, delete the stalled entry and re-add it
+  // so TorBox immediately binds to the cached copy.
+  if (!filesReady && hash) {
+    try {
+      const isCachedGlobally = await checkCached(apiKey, hash);
+      if (isCachedGlobally) {
+        if (torrent.id) {
+          await controlTorrent(apiKey, torrent.id, "delete");
+        }
+        const readded = await createTorrent(apiKey, magnet || magnetFromInfohash(hash, name), {
+          addOnlyIfCached: instantOnly,
+        });
+        const newId = readded && readded.torrent_id;
+        if (newId !== undefined && newId !== null) {
+          for (let attempt = 0; attempt < 2; attempt++) {
+            torrent = await getMyList(apiKey, { id: newId });
+            filesReady =
+              torrent &&
+              (torrent.download_present === true ||
+                torrent.download_finished === true ||
+                (Array.isArray(torrent.files) && torrent.files.length > 0));
+            if (filesReady) break;
+            await new Promise((r) => setTimeout(r, 600));
+          }
+        }
+      }
+    } catch (err) {
+      console.error("Auto-recovery of stuck cached torrent failed:", err.message);
+    }
+  }
 
   if (!filesReady) {
     const pct = typeof torrent.progress === "number"
@@ -400,6 +451,7 @@ module.exports = {
   createTorrentFromUrl,
   getMyList,
   findTorrentByHash,
+  controlTorrent,
   requestDownloadLink,
   resolveStreams,
   formatBytes,

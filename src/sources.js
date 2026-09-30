@@ -22,7 +22,10 @@ const listCache = new TTLCache(5 * 60 * 1000, 200); // search pages, 5 min
 const detailCache = new TTLCache(60 * 60 * 1000, 1000); // detail pages, 1 h
 const limitAbb = pLimit(5); // at most 5 concurrent ABB fetches
 
-const AUDIOBOOK_CATEGORIES = []; // empty = don't filter; rely on the indexer being audiobook-only
+const AUDIOBOOK_CATEGORIES = (process.env.AUDIOBOOK_CATEGORIES || "3030")
+  .split(",")
+  .map((n) => parseInt(n, 10))
+  .filter((n) => Number.isFinite(n));
 
 // Torznab 7030 = Books/Comics. Overridable for indexers that file manga/comics
 // elsewhere: COMIC_CATEGORIES="7030,8000" etc.
@@ -74,6 +77,18 @@ function qualityScore(item) {
   else if (/mp3/.test(fmt)) score += 100;
   // Size as a faint tiebreaker (bigger usually = higher bitrate).
   score += Math.min((item.size || 0) / (1024 * 1024), 2000) * 0.1;
+
+  // Penalize releases explicitly tagged with non-English audio languages
+  const name = String(item.name || "").toLowerCase();
+  if (
+    /\[\s*(?:польский|русский|французский|немецкий|испанский|итальянский|dansk|swedish|norwegian|finnish|german|french|spanish|polish|italian|russian)\s*\]/i.test(
+      name
+    ) &&
+    !/английский|english/i.test(name)
+  ) {
+    score -= 8000;
+  }
+
   return Math.round(score);
 }
 
@@ -104,21 +119,16 @@ function abbDomain(config) {
 }
 
 async function abbFetchRaw(url) {
-  return withRetry(
-    async () => {
-      const res = await fetch(url, {
-        headers: { "User-Agent": BROWSER_UA, Accept: "text/html" },
-      });
-      if (!res.ok) throw new Error(`ABB HTTP ${res.status} for ${url}`);
-      const text = await res.text();
-      // Crude Cloudflare-challenge detection so the failure mode is obvious.
-      if (/cf-browser-verification|Just a moment\.\.\./i.test(text)) {
-        throw new Error("ABB is behind a Cloudflare challenge (needs a solver or a different domain)");
-      }
-      return text;
-    },
-    { retries: 2, baseDelayMs: 300 }
-  );
+  const res = await fetch(url, {
+    headers: { "User-Agent": BROWSER_UA, Accept: "text/html" },
+    signal: AbortSignal.timeout(2000),
+  });
+  if (!res.ok) throw new Error(`ABB HTTP ${res.status} for ${url}`);
+  const text = await res.text();
+  if (/cf-browser-verification|Just a moment\.\.\./i.test(text)) {
+    throw new Error("ABB is behind a Cloudflare challenge (needs a solver or a different domain)");
+  }
+  return text;
 }
 
 // Cached + concurrency-limited fetch.
@@ -219,7 +229,9 @@ async function searchAudiobookBay(config, query, page = 1) {
   if (!domain) return []; // not configured
 
   const pagePath = page > 1 ? `/page/${page}` : "";
-  const listUrl = `https://${domain}${pagePath}/?s=${encodeURIComponent(query)}`;
+  const listUrl = query
+    ? `https://${domain}${pagePath}/?s=${encodeURIComponent(query)}`
+    : `https://${domain}${pagePath}/`;
   let listHtml;
   try {
     listHtml = await abbFetch(listUrl, listCache);
@@ -341,11 +353,44 @@ function dedupeAndSort(settled) {
   return [...byKey.values()].sort((a, b) => b.seeders - a.seeders);
 }
 
+const QUERY_REPLACEMENTS = [
+  [/\bstarwars\b/gi, "star wars"],
+  [/\bspiderman\b/gi, "spider-man"],
+  [/\blordoftherings\b/gi, "lord of the rings"],
+  [/\bharrypotter\b/gi, "harry potter"],
+  [/\bgameofthrones\b/gi, "game of thrones"],
+  [/\bdragonball\b/gi, "dragon ball"],
+  [/\bpercyjackson\b/gi, "percy jackson"],
+  [/\bwheeloftime\b/gi, "wheel of time"],
+  [/\bhungergames\b/gi, "hunger games"],
+  [/\bdarktower\b/gi, "dark tower"],
+  [/\bthewitcher\b/gi, "the witcher"],
+  [/\bchroniclesofnarnia\b/gi, "chronicles of narnia"],
+  [/\bstormlightarchive\b/gi, "stormlight archive"],
+];
+
+function normalizeSearchQuery(query) {
+  if (!query) return "";
+  let q = String(query).trim();
+  for (const [pattern, replacement] of QUERY_REPLACEMENTS) {
+    q = q.replace(pattern, replacement);
+  }
+  return q.replace(/\s+/g, " ").trim();
+}
+
 async function searchAudiobooks(config, query, page = 1) {
-  const results = await Promise.allSettled([
-    searchAudiobookBay(config, query, page),
-    page === 1 ? searchJackett(config, query) : Promise.resolve([]),
+  const normQuery = normalizeSearchQuery(query);
+  const queriesToRun = [normQuery];
+  if (query && query.trim() && query.trim().toLowerCase() !== normQuery.toLowerCase()) {
+    queriesToRun.push(query.trim());
+  }
+
+  const allPromises = queriesToRun.flatMap((q) => [
+    searchAudiobookBay(config, q, page),
+    page === 1 ? searchJackett(config, q) : Promise.resolve([]),
   ]);
+
+  const results = await Promise.allSettled(allPromises);
   return dedupeAndSort(results);
 }
 
@@ -353,7 +398,15 @@ async function searchAudiobooks(config, query, page = 1) {
 // as the audiobook Jackett path, since Jackett results aren't paginated here.
 async function searchComics(config, query, page = 1) {
   if (page > 1) return [];
-  const results = await Promise.allSettled([searchJackett(config, query, COMIC_CATEGORIES)]);
+  const normQuery = normalizeSearchQuery(query);
+  const queriesToRun = [normQuery];
+  if (query && query.trim() && query.trim().toLowerCase() !== normQuery.toLowerCase()) {
+    queriesToRun.push(query.trim());
+  }
+
+  const results = await Promise.allSettled(
+    queriesToRun.map((q) => searchJackett(config, q, COMIC_CATEGORIES))
+  );
   return dedupeAndSort(results).map((r) => {
     const tags = parseComicTags(r.name);
     return { ...r, type: "comic", format: tags.format, bitrate: null };
@@ -365,6 +418,7 @@ module.exports = {
   searchComics,
   qualityScore,
   comicQualityScore,
+  normalizeSearchQuery,
   // exported for testing
   _parseAbbList: parseAbbList,
   _parseAbbDetail: parseAbbDetail,
