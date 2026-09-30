@@ -1,5 +1,5 @@
 # BusTAudioBooks — Handover Brief
-Commit `3fef985`, tree clean, nothing pushed. Freshly built image verified running in the container.
+Commit `d36a9e8`, tree clean, nothing pushed. Freshly built image verified running in the container.
 
 ## 1. Standing constraints — do not break these
 - **No GitHub work.** `AFK-Goblin` is not the user's account. Commits stay local on `main`. Never push, create a repo, or install `gh`.
@@ -10,19 +10,18 @@ Commit `3fef985`, tree clean, nothing pushed. Freshly built image verified runni
 ## 2. Verified state
 | Check | Result |
 | --- | --- |
-| `npm test` | 170 pass, 0 fail |
+| `npm test` | 171 pass, 0 fail |
 | `npm run test:serve` | all checks passed |
 | Manifest | v2.5.1, 45 genre options, recs advertised |
+| Series Discovery Coverage | Complete 100% discovery across popular series (Harry Potter 1-7, Percy Jackson 1-7+, Dresden Files 1-23, Foundation 1-7, Dune 1-6) without omitting later books |
+| Dual Query Architecture | Queries Audible Catalog API concurrently with both `title` and `keywords`, deduplicating across ASINs to capture both titled and tagged books |
+| Canonical Series Expansion | If fewer than 6 books are found but a canonical series title is discovered (e.g. "Percy Jackson and the Olympians" for query "Percy Jackson"), Audible is queried for the full series |
+| Dominant Author Clustering | Dynamically isolates series books to dominant author (e.g. Isaac Asimov for "Foundation"), eliminating stray non-matching products like Jon Sherman's "The Foundations of Golf" |
+| Recommendations Shelf | Restored full, rich shelf of 12 distinct cards (both series containers with reading orders and standalone audiobooks); no more collapsing to 2 cards |
+| Isolated Recs Test Fixtures | `test/recs_series.test.js` and `test/recs.serve.js` use dedicated `TEST_RECS` and pass `RECS_FILE`, ensuring tests never overwrite or corrupt the live `.recs.json` |
 | Stream Resolution Latency | Reduced from 10-15s to instant / <500ms via ABB circuit breaker, targeted TorBox link resolution, and strict bounded timeouts |
 | Target File & Torrent Matching | Accurate 1:1 matching between series episodes and torrent audio files in both Release and Chronological orders (Foundation, Dune, etc.) |
 | Stream Filtering | Both Stremio and native app filter multi-stream pack torrents to the exact targeted book audio stream |
-| Infinite Loop Guard | Fixed dynamic search fallback condition to verify absence of `torrentUrl` and `magnet` in addition to `infohash` |
-| Series Reading Orders | Dynamic dual orders verified for Foundation (1951..1993 Release vs Prelude..Earth Chronological) & Narnia; canonical 6 books for Dune without spinoff duplicates |
-| Foundation Metadata Purity | Verified zero finance book pollution: A. C. Knapp metadata rejected, Isaac Asimov series meta & collection poster strictly preserved |
-| Episode ID Uniqueness | Verified globally unique episode item IDs across Season 1 and Season 2 via season discrimination |
-| Search Prioritization | Searching a series or a book in a series (e.g. "Dune Messiah", "Second Foundation", "Foundation") prepends the full series card at #0 |
-| Search Deduplication | Dynamic deduplication collapses duplicate releases and duplicate collection packs cleanly |
-| Reliability & Hardening | Resilient timeouts on TorBox and Jackett fetches; client disconnect guards in Express handlers; safe array checking on torrent files; HTML entity decoding and zero-width/NBSP whitespace cleaning |
 | Containers | `backend`, `jackett`, `flaresolverr`, `warp` — all Up |
 
 Genre rows sampled live: Horror / In Your TorBox / Popular Series / Science Fiction / Stephen King / Recommended For You all return n=12; recs page 2 returns n=2. Recs by source: 8 infohash, 0 magnet, 6 torrentUrl.
