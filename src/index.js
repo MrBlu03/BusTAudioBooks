@@ -9,6 +9,7 @@ const crypto = require("crypto");
 const { manifest } = require("./manifest");
 const genres = require("./genres");
 const { resolveGenre } = genres;
+const { getRecs } = require("./recs");
 const { decodeConfig } = require("./config");
 const { searchAudiobooks, searchComics, qualityScore, comicQualityScore } = require("./sources");
 const { enrich } = require("./metadata");
@@ -317,6 +318,11 @@ async function handleCatalog(req, res, extraRaw) {
 
   let items = [];
   let searchQuery = query;
+  // Set by the recommendations row below. It must not fall back to the
+  // hardcoded FEATURED_AUDIOBOOKS list: those are arbitrary popular titles, and
+  // presenting them as "Recommended For You" is simply a lie about what the
+  // recommender chose. An empty row is the honest result.
+  let isRecsRow = false;
   const g = resolveGenre(genre);
 
   if (query) {
@@ -347,6 +353,24 @@ async function handleCatalog(req, res, extraRaw) {
         }));
       }
     } catch (_) {}
+  } else if (g && g.kind === genres.RECS) {
+    // Personal recommendations. Fully resolved by scripts/refresh-recs.js: each
+    // entry already carries the release to play, so this branch does no network
+    // work at all. That matters — resolving here meant firing one source request
+    // per book at once, which AudiobookBay answers with an empty page.
+    const list = getRecs();
+    searchQuery = "";
+    isRecsRow = true;
+    if (!list.items.length) {
+      console.warn("Recommendations requested but .recs.json has no playable entries — run scripts/refresh-recs.js");
+    }
+    items = list.items.map((rec) => {
+      const best = { ...rec.release, tracker: "AudiobookBay", seeders: 0 };
+      if (!best.name) best.name = rec.title;
+      if (rec.author) best.author = rec.author;
+      if (rec.reason) best.reason = rec.reason;
+      return best;
+    });
   } else {
     // Every other category is one plain search. The genre table lives in
     // src/genres.js; an unknown name falls back to the default browse
@@ -470,7 +494,7 @@ async function handleCatalog(req, res, extraRaw) {
 
   // When browsing catalog or when live search returns 0 results, fallback to featured items
   let finalItems = items;
-  if (!finalItems || finalItems.length === 0) {
+  if ((!finalItems || finalItems.length === 0) && !isRecsRow) {
     if (query) {
       const q = query.toLowerCase();
       finalItems = FEATURED_AUDIOBOOKS.filter(
@@ -571,6 +595,10 @@ async function handleMeta(req, res) {
   ]);
 
   const descParts = [];
+  // The personal-recommendations row carries the model's "why this book". It is
+  // the only thing distinguishing these tiles from a normal search result, so
+  // it leads.
+  if (item.reason) descParts.push(item.reason);
   if (meta.author) descParts.push(`By ${meta.author}`);
   if (meta.narrator) descParts.push(`Narrated by ${meta.narrator}`);
   if (meta.description) descParts.push(meta.description);
@@ -808,6 +836,21 @@ async function handleHealth(req, res) {
 }
 app.get("/health", handleHealth);
 app.get("/:config/health", handleHealth);
+
+// A Stremio addon that dies on one bad request is worse than one that returns
+// an empty catalogue: Stremio gives up on the whole addon. Async route handlers
+// are not wrapped by Express 4, so a throw inside one becomes an unhandled
+// rejection and takes the process with it. Catch it here, answer with a valid
+// but empty response, and log loudly.
+app.use((err, req, res, next) => {
+  console.error(`[500] ${req.method} ${req.path}:`, err && err.message);
+  if (res.headersSent) return next(err);
+  // Stremio understands these shapes: {metas} for a catalog, {meta} for a meta.
+  if (req.path.startsWith("/catalog")) return res.json({ metas: [] });
+  if (req.path.startsWith("/meta")) return res.json({ meta: null });
+  if (req.path.startsWith("/stream")) return res.json({ streams: [] });
+  res.status(500).json({ err: "Internal error" });
+});
 
 app.listen(PORT, () => {
   console.log(`BusTAudioBooks addon running on http://127.0.0.1:${PORT}`);

@@ -7,7 +7,11 @@
   "scripts": {
     "start": "node src/index.js",
     "test": "node --test test/*.test.js",
-    "test:live": "node test/libex.live.js && node test/metadata.live.js"
+    "test:live": "node test/libex.live.js && node test/metadata.live.js",
+    "recs:profiles": "node scripts/nuvio-profiles.js",
+    "recs:inspect": "node scripts/nuvio-inspect.js",
+    "recs:list": "node scripts/nuvio-list.js",
+    "recs:refresh": "node scripts/refresh-recs.js"
   },
   "engines": {
     "node": ">=18"

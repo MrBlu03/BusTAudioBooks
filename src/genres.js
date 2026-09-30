@@ -24,10 +24,13 @@ const BROWSE = "browse";
 const TORBOX = "torbox";
 /** A single text search against ABB. */
 const SEARCH = "search";
+/** Personal recommendations generated from the Nuvio library. */
+const RECS = "recs";
 
 const GENRES = [
   // -- default / account ------------------------------------------------------
   { name: "Popular & Trending", kind: BROWSE, query: null },
+  { name: "Recommended For You", kind: RECS, query: null },
   { name: "In Your TorBox", kind: TORBOX, query: null },
   { name: "Popular Series", kind: SEARCH, query: "complete series" },
 
@@ -109,4 +112,5 @@ module.exports = {
   BROWSE,
   TORBOX,
   SEARCH,
+  RECS,
 };

@@ -17,6 +17,9 @@ function encodeItemId(item) {
       // comics existed keep decoding exactly as they always did.
       t: item.type === "comic" ? "c" : undefined,
       tf: item.targetFile || undefined,
+      // "Why we picked this" for the personal-recommendations row. Optional and
+      // absent on every other id, so existing ids keep decoding unchanged.
+      r: item.reason || undefined,
     }),
     "utf8"
   ).toString("base64url");
@@ -39,6 +42,7 @@ function decodeItemId(id) {
       size: obj.s,
       type: obj.t === "c" ? "comic" : "audiobook",
       targetFile: obj.tf || null,
+      reason: obj.r || null,
     };
   } catch (_) {
     return null;

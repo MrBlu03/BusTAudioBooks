@@ -59,6 +59,33 @@ function stripBrackets(s) {
     .replace(/\{[^}]*\}/g, " ");
 }
 
+// Release titles are not consistently "Title - Author":
+//   "Foundation (Book 1) - Isaac Asimov"          -> title first
+//   "City of Bones - The Mortal Instruments 1 - Cassandra Clare" -> author last, series in the middle
+//   "Andy Weir - Project Hail Mary"               -> author FIRST
+//   "Frank Herbert - Dune Messiah (2007) edition" -> author first
+// So decide by looking at the parts rather than assuming position.
+const NAME_STOPWORDS =
+  /\b(book|books|series|vol|volume|part|chapter|edition|editions|audio|audiobook|audiobooks|narrated|unabridged|abridged|complete|collection|omnibus|box|set|cd|mp3|m4b|disc)\b/i;
+
+/**
+ * Heuristic: does this fragment read like a person's name?
+ * Deliberately conservative — a false positive mislabels the title, so it
+ * only fires on fragments that look like a real name and nothing else.
+ */
+function looksLikeAuthor(fragment) {
+  const s = String(fragment || "").trim();
+  if (!s || s.length > 60) return false;
+  if (/[0-9]/.test(s)) return false; // "Book 1", "(2007)"
+  if (/[:?!,;]/.test(s)) return false; // titles love punctuation
+  if (NAME_STOPWORDS.test(s)) return false; // "Dune Messiah edition"
+  const words = s.split(/\s+/);
+  if (words.length < 2 || words.length > 4) return false; // one word = a title
+  return words.every(
+    (w) => /^[A-Z\p{Lu}]/.test(w) || /^(de|del|van|von|der|la|le|bin|al|da|di|dos|du)$/i.test(w)
+  );
+}
+
 // Pull titles apart cleanly into { title, author }
 function parseNameParts(raw, type = "audiobook") {
   let s = stripBrackets(raw);
@@ -67,13 +94,42 @@ function parseNameParts(raw, type = "audiobook") {
   s = s.replace(/[_]+/g, " ").replace(/\s+/g, " ").trim();
   const parts = s.split(/\s+[-–—:]\s+/).map((x) => x.trim()).filter(Boolean);
   if (parts.length >= 2) {
-    return { title: parts[0], author: parts.slice(1).join(" ").trim() || null };
+    const first = parts[0];
+    const last = parts[parts.length - 1];
+
+    // Author-first: both ends read like names, and the trailing part is the
+    // longer, more title-like fragment.
+    if (looksLikeAuthor(first) && !looksLikeAuthor(last) && last.length > first.length) {
+      return { title: last, author: first, series: null };
+    }
+
+    // Otherwise scan from the right for the first fragment that reads like a
+    // name. Everything between the title and the author is a series/edition
+    // fragment, which must not be folded into the author — "Dune - Frank
+    // Herbert - Complete Series" used to yield "Frank Herbert Series".
+    let authorIndex = -1;
+    for (let i = parts.length - 1; i >= 1; i--) {
+      if (looksLikeAuthor(parts[i])) {
+        authorIndex = i;
+        break;
+      }
+    }
+    if (authorIndex !== -1) {
+      const between = parts.slice(1, authorIndex).join(" - ").trim();
+      return {
+        title: first,
+        author: parts[authorIndex],
+        series: between || null,
+      };
+    }
+
+    return { title: first, author: parts.slice(1).join(" ").trim() || null, series: null };
   }
   const byMatch = s.match(/^(.*?)\s+by\s+([A-Z][a-zA-Z\s.'-]+)$/i);
   if (byMatch) {
-    return { title: byMatch[1].trim(), author: byMatch[2].trim() || null };
+    return { title: byMatch[1].trim(), author: byMatch[2].trim() || null, series: null };
   }
-  return { title: s, author: null };
+  return { title: s, author: null, series: null };
 }
 
 function cleanTitle(raw) {

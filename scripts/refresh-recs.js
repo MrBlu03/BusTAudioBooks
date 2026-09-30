@@ -1,0 +1,494 @@
+// scripts/refresh-recs.js
+// Generate personal audiobook recommendations from the Nuvio library.
+//
+//   node scripts/refresh-recs.js            # regenerate only if the library changed
+//   node scripts/refresh-recs.js --force    # regenerate regardless
+//   node scripts/refresh-recs.js --dry-run  # show the library + prompt, call nothing
+//
+// COST CONTROL
+// The whole point is to not spend tokens when nothing has changed. The library
+// is fingerprinted with a hash of its content_ids; if that hash matches the one
+// stored in .recs-state.json and .recs.json exists, the model is not called at
+// all. Adding or removing a single book in Nuvio is what triggers a run.
+//
+// OUTPUT
+// Writes .recs.json (gitignored):
+//   { generatedAt, model, basedOnHash, count, items: [{title, author, reason}] }
+// The addon then resolves each title through AudiobookBay at request time, so
+// a recommendation is only shown if it is actually playable.
+
+const fs = require("fs");
+const path = require("path");
+const { spawn } = require("child_process");
+
+const nuvio = require("../src/nuvio");
+const libex = require("../src/libex");
+const sources = require("../src/sources");
+const { parseNameParts } = require("../src/metadata");
+const { searchTermFor, titleMatches } = require("../src/recs");
+
+const ROOT = path.join(__dirname, "..");
+const RECS_FILE = process.env.RECS_FILE || path.join(ROOT, ".recs.json");
+const STATE_FILE = process.env.RECS_STATE_FILE || path.join(ROOT, ".recs-state.json");
+
+// Free models only. Override with RECS_MODEL if a better one is available.
+const DEFAULT_MODEL = "opencode/space-bunny-free";
+const MODEL = process.env.RECS_MODEL || DEFAULT_MODEL;
+
+const WANT = parseInt(process.env.RECS_COUNT || "15", 10);
+const TIMEOUT_MS = parseInt(process.env.RECS_TIMEOUT_MS || "240000", 10);
+
+// The desktop app bundles the CLI; it is not on PATH.
+const CLI_CANDIDATES = [
+  process.env.OPENCODE_CLI,
+  path.join(process.env.LOCALAPPDATA || "", "Programs", "@opencodedesktop", "resources", "opencode-cli.exe"),
+  path.join(process.env.LOCALAPPDATA || "", "Programs", "opencode", "bin", "opencode.exe"),
+  "opencode",
+].filter(Boolean);
+
+function loadDotEnv() {
+  const file = path.join(ROOT, ".env");
+  if (!fs.existsSync(file)) return;
+  for (const line of fs.readFileSync(file, "utf8").split(/\r?\n/)) {
+    const m = line.match(/^\s*([A-Za-z0-9_]+)\s*=\s*(.*?)\s*$/);
+    if (!m) continue;
+    let value = m[2].replace(/^["']|["']$/g, "");
+    if (process.env[m[1]] === undefined) process.env[m[1]] = value;
+  }
+}
+
+const readJson = (f) => {
+  try {
+    return JSON.parse(fs.readFileSync(f, "utf8"));
+  } catch (_) {
+    return null;
+  }
+};
+
+// -- library ------------------------------------------------------------------
+
+/**
+ * Fetch the profile's library and reduce each release name to title/author.
+ * Names are torrent-style ("Foundation (Book 1) - Isaac Asimov"), which is what
+ * the recommender should NOT see; parseNameParts already knows how to strip
+ * the release noise, and Libex canonicalises the result against Audible.
+ */
+async function loadLibrary(profileIndex) {
+  const { events } = await nuvio.pullLibraryDelta(profileIndex, 0);
+  const state = new Map();
+  for (const ev of events) {
+    const key = ev.content_id || ev.id;
+    if (!key) continue;
+    if (ev.operation === "delete") state.delete(key);
+    else state.set(key, ev);
+  }
+
+  const books = [];
+  for (const row of state.values()) {
+    const item = nuvio.normaliseItem(row);
+    if (!item || !item.name) continue;
+    if (item.contentType && item.contentType !== "audiobook") continue;
+    const parsed = parseNameParts(item.name, "audiobook");
+    if (!parsed.title) continue;
+    books.push({
+      contentId: item.contentId,
+      title: parsed.title,
+      author: parsed.author || null,
+      series: parsed.series || null,
+      raw: item.name,
+    });
+  }
+
+  // De-duplicate by title+author: the same book can be saved twice.
+  const byKey = new Map();
+  for (const b of books) {
+    const key = `${b.title}|${b.author || ""}`.toLowerCase();
+    if (!byKey.has(key)) byKey.set(key, b);
+  }
+  const unique = [...byKey.values()];
+
+  // Canonicalise against Audible where possible. The release names are
+  // inconsistent ("Andy Weir - Project Hail Mary" is author-first, "Frank
+  // Herbert - Dune Messiah (2007) edition" has the edition glued on) and only
+  // Libex knows the real title/author.
+  const CANONICALISE = process.env.RECS_CANONICALISE !== "0";
+  if (CANONICALISE) {
+    const apply = (b, hit) => {
+      b.parsedTitle = b.parsedTitle || b.title;
+      b.title = hit.title;
+      if (hit.author) b.author = hit.author;
+      if (hit.series && !b.series) b.series = hit.series;
+    };
+
+    for (const b of unique) {
+      try {
+        let hit = await libex.lookup(b.title, b.author);
+
+        // No hit: the parser may have the two ends the wrong way round, which
+        // no heuristic can settle. Libex can — it is an exact-title oracle, so
+        // retry with title/author swapped before giving up.
+        if (!hit && b.author) {
+          const swapped = await libex.lookup(b.author, b.title);
+          if (swapped && swapped.title) {
+            hit = swapped;
+            b.swapped = true;
+          }
+        }
+
+        if (hit && hit.title) apply(b, hit);
+      } catch (_) {
+        /* keep parsed values */
+      }
+    }
+  }
+
+  return unique;
+}
+
+// -- model --------------------------------------------------------------------
+
+/**
+ * Run the opencode CLI and return its stdout.
+ *
+ * Uses spawn, not execFile. execFile hangs indefinitely against this CLI
+ * (measured: 180s with no output, then SIGTERM) while spawn returns in 2-3s.
+ * The CLI keeps its state in a SQLite database under the opencode data dir and
+ * the two entry points evidently contend for it. Do not "simplify" this back to
+ * execFile.
+ */
+function runModel(prompt) {
+  return new Promise((resolve, reject) => {
+    let lastErr = null;
+
+    const attempt = (i) => {
+      if (i >= CLI_CANDIDATES.length) {
+        return reject(lastErr || new Error("opencode CLI not found in any known location"));
+      }
+      const bin = CLI_CANDIDATES[i];
+      let child;
+      try {
+        child = spawn(bin, ["run", "--model", MODEL, "--format", "json", prompt], {
+          stdio: ["ignore", "pipe", "pipe"],
+          windowsHide: true,
+        });
+      } catch (err) {
+        lastErr = err;
+        return attempt(i + 1);
+      }
+
+      let stdout = "";
+      let stderr = "";
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        try {
+          child.kill();
+        } catch (_) {}
+        lastErr = new Error(`model timed out after ${TIMEOUT_MS}ms`);
+        attempt(i + 1);
+      }, TIMEOUT_MS);
+
+      const finish = (err) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (err) {
+          lastErr = err;
+          return attempt(i + 1);
+        }
+        resolve(stdout);
+      };
+
+      child.stdout.on("data", (d) => (stdout += d));
+      child.stderr.on("data", (d) => (stderr += d));
+      child.on("error", (err) => finish(err));
+      child.on("close", (code) => {
+        if (code !== 0 && !stdout.trim()) {
+          return finish(new Error(`${bin} exited ${code}: ${stderr.slice(0, 200)}`));
+        }
+        if (!stdout.trim()) {
+          return finish(new Error(`${bin} produced no output`));
+        }
+        finish(null);
+      });
+    };
+
+    attempt(0);
+  });
+}
+
+/**
+ * Pull the model's reply out of the CLI's JSONL stream and then out of
+ * whatever prose/fencing wrapped the actual answer.
+ */
+function extractJson(stdout) {
+  let text = "";
+  for (const line of stdout.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("{")) continue;
+    try {
+      const evt = JSON.parse(trimmed);
+      if (evt.type === "text" && evt.part && typeof evt.part.text === "string") {
+        text += evt.part.text;
+      }
+    } catch (_) {
+      /* not our JSONL, or partial line */
+    }
+  }
+  if (!text.trim()) text = stdout;
+
+  // Strip code fences and any leading/trailing prose.
+  text = text.replace(/```(?:json)?/gi, " ").trim();
+
+  const start = text.search(/[[{]/);
+  if (start === -1) return null;
+  // Walk forward to find the matching bracket, respecting strings.
+  const open = text[start];
+  const close = open === "[" ? "]" : "}";
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (ch === "\\") esc = true;
+      else if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') inStr = true;
+    else if (ch === open) depth++;
+    else if (ch === close) {
+      depth--;
+      if (depth === 0) {
+        try {
+          return JSON.parse(text.slice(start, i + 1));
+        } catch (_) {
+          break;
+        }
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Coerce whatever the model returned into [{title, author, reason}].
+ * @param parsed      whatever extractJson() produced
+ * @param libraryTitles array of plain title strings already owned by the user
+ */
+function normaliseRecs(parsed, libraryTitles) {
+  let rows = parsed;
+  if (parsed && !Array.isArray(parsed)) {
+    // Some models wrap the array in an object.
+    const key = Object.keys(parsed).find((k) => Array.isArray(parsed[k]));
+    rows = key ? parsed[key] : [];
+  }
+  if (!Array.isArray(rows)) return [];
+
+  const have = new Set(libraryTitles.filter(Boolean).map((t) => String(t).trim().toLowerCase()));
+  const out = [];
+  const seen = new Set();
+  for (const r of rows) {
+    if (!r) continue;
+    // Tolerate {title,author} or {name,by} or a bare string.
+    const title = String(r.title || r.name || (typeof r === "string" ? r : "") || "").trim();
+    if (!title || title.length < 2) continue;
+    const author = String(r.author || r.by || r.writer || "").trim() || null;
+    const reason = String(r.reason || r.why || r.description || "").trim().slice(0, 200) || null;
+    const key = `${title}|${author || ""}`.toLowerCase();
+    if (seen.has(key)) continue;
+    if (have.has(title.toLowerCase())) continue; // already in the library
+    seen.add(key);
+    out.push({ title, author, reason });
+  }
+  return out;
+}
+
+// -- resolution ---------------------------------------------------------------
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Turn each recommendation into a playable release.
+ *
+ * This happens here, offline, rather than in the catalogue request. Doing it on
+ * the request path means one source request per recommendation fired at once,
+ * and AudiobookBay answers a burst with an empty page or its front page instead
+ * of results — measured here: "A Game of Thrones" resolves fine on its own but
+ * returns nothing when sixteen searches go out together. So the requests are
+ * serialised with a real gap, and the catalogue just reads the outcome.
+ *
+ * A recommendation that does not resolve is dropped rather than shown as a dead
+ * tile. ABB is a small index, so for a lot of good suggestions this is the
+ * expected outcome, and the summary printed at the end says so plainly.
+ */
+async function resolveRecs(recs, cfg) {
+  const gap = parseInt(process.env.RECS_GAP_MS || "2500", 10);
+  const resolved = [];
+
+  for (const rec of recs) {
+    const term = searchTermFor(rec);
+    if (!term) continue;
+
+    let hits = [];
+    try {
+      hits = await sources.searchAudiobooks(cfg, term, 1);
+    } catch (err) {
+      console.warn(`  ! ${rec.title}: ${err.message}`);
+    }
+
+    // AudiobookBay can answer a search with its front page, so never trust the
+    // result set blindly — require the hit to actually be the book we asked for.
+    const hit = hits.find((h) => titleMatches(h.name, rec.title));
+    if (!hit) {
+      console.log(`  - ${rec.title} (not in the index)`);
+      continue;
+    }
+
+    resolved.push({
+      ...rec,
+      release: {
+        name: hit.name,
+        infohash: hit.infohash || null,
+        magnet: hit.magnet || null,
+        size: hit.size || 0,
+        format: hit.format || null,
+        bitrate: hit.bitrate || null,
+      },
+    });
+    console.log(`  + ${rec.title} -> ${hit.name}`);
+
+    await sleep(gap);
+  }
+
+  return resolved;
+}
+
+// -- prompt -------------------------------------------------------------------
+
+function buildPrompt(books) {
+  const lines = books.map((b) => (b.author ? `- ${b.title} — ${b.author}` : `- ${b.title}`));
+  return [
+    "You are recommending audiobooks to one specific reader.",
+    "",
+    "Their library (books they already have, listed by title and author):",
+    ...lines,
+    "",
+    `Recommend ${WANT} audiobooks they almost certainly do NOT already own.`,
+    "Infer their taste from the library: preferred genres, tone, series they",
+    "follow, authors they read, and era. Favour well-known, widely available",
+    "titles that exist as real audiobooks, because each title will be looked up",
+    "in a torrent index and must resolve to something playable.",
+    "",
+    "Do not recommend anything already in the list above.",
+    "",
+    "Reply with ONLY a JSON array, no prose and no code fence, like:",
+    '[{"title":"Book Name","author":"Author Name","reason":"One short sentence."}]',
+  ].join("\n");
+}
+
+// -- main ---------------------------------------------------------------------
+
+(async () => {
+  loadDotEnv();
+
+  const force = process.argv.includes("--force");
+  const dryRun = process.argv.includes("--dry-run");
+
+  if (!nuvio.isConfigured()) {
+    console.error("NUVIO_EMAIL / NUVIO_PASSWORD are not set in .env. Nothing to do.");
+    process.exit(1);
+  }
+  const profileIndex = nuvio.parseProfileIndex(process.env.NUVIO_PROFILE_ID);
+  if (!profileIndex) {
+    console.error("NUVIO_PROFILE_ID must be 1..6. Run `node scripts/nuvio-profiles.js`.");
+    process.exit(1);
+  }
+
+  const books = await loadLibrary(profileIndex);
+  const hash = nuvio.hashContentIds(books.map((b) => b.contentId));
+  console.log(`Profile [${profileIndex}]: ${books.length} distinct books, fingerprint ${hash.slice(0, 12)}`);
+
+  const existing = readJson(RECS_FILE);
+  const state = readJson(STATE_FILE);
+
+  if (dryRun) {
+    console.log("\n--- library as the model will see it ---");
+    for (const b of books) console.log(`  ${b.title}${b.author ? " — " + b.author : ""}`);
+    console.log(`\n--- prompt ---\n${buildPrompt(books)}`);
+    return;
+  }
+
+  if (!force && existing && state && state.hash === hash && Array.isArray(existing.items)) {
+    console.log(
+      `Library unchanged since ${existing.generatedAt}. Keeping ${existing.items.length} recommendations — model not called.`
+    );
+    console.log("(use --force to regenerate anyway)");
+    return;
+  }
+
+  if (!books.length) {
+    console.error("Library is empty; refusing to guess. Add some books to the profile first.");
+    process.exit(1);
+  }
+
+  console.log(`\nGenerating with model ${MODEL} ...`);
+  const started = Date.now();
+  let stdout;
+  try {
+    stdout = await runModel(buildPrompt(books));
+  } catch (err) {
+    console.error("Model call failed:", err.message);
+    if (existing && Array.isArray(existing.items)) {
+      console.error("Keeping the previous recommendations.");
+    }
+    process.exit(1);
+  }
+
+  const parsed = extractJson(stdout);
+  const recs = normaliseRecs(parsed, books.map((b) => b.title));
+  const secs = ((Date.now() - started) / 1000).toFixed(1);
+
+  if (!recs.length) {
+    console.error(`Model returned no usable recommendations after ${secs}s.`);
+    console.error("Raw output was:\n" + stdout.slice(0, 800));
+    if (existing && Array.isArray(existing.items)) console.error("Keeping the previous set.");
+    process.exit(1);
+  }
+
+  console.log(`\n${recs.length} recommendations in ${secs}s. Resolving to playable releases...`);
+  const resolved = await resolveRecs(recs, {
+    abbDomain: process.env.ABB_DOMAIN || "audiobookbay.lu",
+  });
+
+  const payload = {
+    generatedAt: new Date().toISOString(),
+    profileIndex,
+    model: MODEL,
+    basedOnHash: hash,
+    basedOnCount: books.length,
+    count: resolved.length,
+    suggested: recs.length,
+    items: resolved,
+  };
+  fs.writeFileSync(RECS_FILE, JSON.stringify(payload, null, 2));
+  fs.writeFileSync(STATE_FILE, JSON.stringify({ hash, count: books.length, at: payload.generatedAt }, null, 2));
+
+  console.log(`\n${resolved.length} of ${recs.length} are actually in the index -> ${path.basename(RECS_FILE)}\n`);
+  resolved.forEach((r, i) =>
+    console.log(`  ${String(i + 1).padStart(2)}. ${r.title}${r.author ? " — " + r.author : ""}\n      ${r.release.name}`)
+  );
+
+  if (!resolved.length) {
+    console.log(
+      "\nNothing resolved. The model suggested titles this index does not carry —\n" +
+        "that is an index-coverage limit, not a failure. Try a different RECS_MODEL,\n" +
+        "or raise RECS_COUNT so more candidates are tried."
+    );
+  }
+})().catch((err) => {
+  console.error("Failed:", err.message);
+  process.exit(1);
+});

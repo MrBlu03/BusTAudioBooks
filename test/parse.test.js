@@ -120,13 +120,43 @@ test("cleanTitle strips noise for metadata lookup", () => {
 });
 
 test("parseNameParts splits Title - Author and drops tags", () => {
-  assert.deepEqual(parseNameParts("Dune - Frank Herbert [M4B] [128 Kbps]"), {
-    title: "Dune",
-    author: "Frank Herbert",
-  });
+  // parseNameParts also reports a `series` fragment now, so compare the two
+  // fields this test is actually about.
+  const parsed = parseNameParts("Dune - Frank Herbert [M4B] [128 Kbps]");
+  assert.equal(parsed.title, "Dune");
+  assert.equal(parsed.author, "Frank Herbert");
+  assert.equal(parsed.series, null);
+
   const solo = parseNameParts("Some Standalone Title [MP3]");
   assert.equal(solo.title, "Some Standalone Title");
   assert.equal(solo.author, null);
+});
+
+test("parseNameParts keeps a series fragment out of the author", () => {
+  // "Title - Series N - Author" previously produced an author of
+  // "The Mortal Instruments, Book 1 Cassandra Clare".
+  const p = parseNameParts("City of Bones - The Mortal Instruments, Book 1 - Cassandra Clare");
+  assert.equal(p.title, "City of Bones");
+  assert.equal(p.author, "Cassandra Clare");
+  assert.equal(p.series, "The Mortal Instruments, Book 1");
+});
+
+test("parseNameParts handles author-first release names", () => {
+  const p = parseNameParts("Frank Herbert - Dune Messiah (2007) edition");
+  assert.equal(p.title, "Dune Messiah edition");
+  assert.equal(p.author, "Frank Herbert");
+});
+
+test("parseNameParts does not mistake a one-word title for an author", () => {
+  // "Foundation" is a title; the author is on the other side of the dash.
+  const p = parseNameParts("Foundation (Book 1) - Isaac Asimov");
+  assert.equal(p.title, "Foundation");
+  assert.equal(p.author, "Isaac Asimov");
+});
+
+test("parseNameParts does not treat a series word as an author", () => {
+  const p = parseNameParts("Dune - Frank Herbert - Complete Series");
+  assert.equal(p.author, "Frank Herbert", "Complete Series must not win the author slot");
 });
 
 test("upscaleItunes bumps artwork resolution", () => {
@@ -177,6 +207,20 @@ test("item id carries the content type; absent type = audiobook (backward compat
   const handBuilt =
     "tbab:" + Buffer.from(JSON.stringify({ n: "Legacy Book" }), "utf8").toString("base64url");
   assert.equal(decodeItemId(handBuilt).type, "audiobook");
+});
+
+test("item id carries the recommendation reason", () => {
+  const withReason = decodeItemId(
+    encodeItemId({ name: "Piranesi", reason: "A short, strange novel your sci-fi taste points at." })
+  );
+  assert.equal(withReason.reason, "A short, strange novel your sci-fi taste points at.");
+
+  // Every other item has no reason, and ids minted before the field existed
+  // must not grow one.
+  assert.equal(decodeItemId(encodeItemId({ name: "Dune" })).reason, null);
+  const legacy =
+    "tbab:" + Buffer.from(JSON.stringify({ n: "Legacy Book" }), "utf8").toString("base64url");
+  assert.equal(decodeItemId(legacy).reason, null);
 });
 
 test("comic noise stripping never touches audiobook titles", () => {

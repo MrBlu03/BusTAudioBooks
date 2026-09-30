@@ -5,7 +5,7 @@
 const test = require("node:test");
 const assert = require("node:assert");
 
-const { GENRES, GENRE_OPTIONS, DEFAULT_GENRE, resolveGenre, BROWSE, TORBOX, SEARCH } = require("../src/genres");
+const { GENRES, GENRE_OPTIONS, DEFAULT_GENRE, resolveGenre, BROWSE, TORBOX, SEARCH, RECS } = require("../src/genres");
 const { manifest } = require("../src/manifest");
 
 test("manifest dropdown is generated from the genre table", () => {
@@ -38,8 +38,15 @@ test("display names are non-empty and reasonably short", () => {
 
 test("every genre has a valid kind", () => {
   for (const g of GENRES) {
-    assert.ok([BROWSE, TORBOX, SEARCH].includes(g.kind), `${g.name} has kind "${g.kind}"`);
+    assert.ok([BROWSE, TORBOX, SEARCH, RECS].includes(g.kind), `${g.name} has kind "${g.kind}"`);
   }
+});
+
+test("exactly one recommendations category, listed near the top", () => {
+  const recs = GENRES.filter((g) => g.kind === RECS);
+  assert.equal(recs.length, 1, "expected exactly one RECS genre");
+  // Beside the other account-specific categories, not buried in the fiction list.
+  assert.ok(GENRE_OPTIONS.indexOf(recs[0].name) <= 3, "Recommended For You should sit near the top");
 });
 
 test("search genres carry a usable query; non-search genres do not", () => {
