@@ -25,55 +25,73 @@ function cleanSeriesQuery(name) {
 
 function cleanBookTitle(raw) {
   return cleanDisplayTitle(raw)
-    .replace(/:\s*(?:unabridged|abridged|a novel).*$/i, "")
+    .replace(/\s*[\(\[](?:Full-Cast|Dramatized|GraphicAudio|Special|Audible|Narrated|Collector's).*?[\)\]]/gi, "")
+    .replace(/:\s*(?:unabridged|abridged|a novel|dramatized|full-cast).*$/i, "")
     .replace(/\s*\((?:un)?abridged\)/gi, "")
     .replace(/\s*,\s*Book\s*\d+/i, "")
     .replace(/\s*\(Book\s*\d+\)/i, "")
     .trim();
 }
 
-/**
- * Dynamically queries Audible Catalog API for products in a series.
- */
-async function fetchSeriesFromAudible(seriesName, author = "") {
-  const cleanName = cleanSeriesQuery(seriesName);
-  if (!cleanName || cleanName.length < 2) return null;
+async function queryAudibleCatalog(qStr, numResults = "50") {
+  const fetchProducts = async (paramKey) => {
+    const params = new URLSearchParams({
+      [paramKey]: qStr,
+      num_results: String(numResults),
+      response_groups: "product_desc,series,contributors,product_attrs,media",
+      products_sort_by: "Relevance",
+    });
+    try {
+      const res = await fetch(`${AUDIBLE_API}?${params.toString()}`, {
+        headers: { Accept: "application/json", "User-Agent": "bustaudio-addon/2.5" },
+        signal: AbortSignal.timeout(3500),
+      });
+      if (!res.ok) return [];
+      const data = await res.json();
+      return Array.isArray(data.products) ? data.products : [];
+    } catch (_) {
+      return [];
+    }
+  };
 
-  const q = author ? `${cleanName} ${author}` : cleanName;
-  const params = new URLSearchParams({
-    keywords: q,
-    num_results: "30",
-    response_groups: "product_desc,series,contributors,product_attrs,media",
-    products_sort_by: "Relevance",
-  });
+  const [byTitle, byKeywords] = await Promise.all([
+    fetchProducts("title"),
+    fetchProducts("keywords"),
+  ]);
 
-  const res = await fetch(`${AUDIBLE_API}?${params.toString()}`, {
-    headers: { Accept: "application/json", "User-Agent": "bustaudio-addon/2.5" },
-    signal: AbortSignal.timeout(3500),
-  });
-  if (!res.ok) return null;
-  const data = await res.json();
-  const products = Array.isArray(data.products) ? data.products : [];
-  if (!products.length) return null;
+  const seenAsin = new Set();
+  const combined = [];
+  for (const p of [...byTitle, ...byKeywords]) {
+    const key = p.asin || p.title;
+    if (key && !seenAsin.has(key)) {
+      seenAsin.add(key);
+      combined.push(p);
+    }
+  }
+  return combined;
+}
 
-  const norm = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
-  const normTarget = norm(cleanName);
-  const normAuthor = norm(author);
-
-  // Check if any product has an exact series title match
-  const hasExactSeriesMatch = products.some((p) =>
-    (p.series || []).some((s) => norm(s.title) === normTarget)
-  );
-
-  // Filter products belonging to this series
+function extractAudibleCandidates(products, normTarget, normAuthor, seriesName, author) {
   const candidates = [];
+  const norm = (s) =>
+    String(s || "")
+      .toLowerCase()
+      .replace(/^(?:the|a|an)\s+/i, "")
+      .replace(/\s*[\(\[][^()\[\]]*[\)\]]/g, " ")
+      .replace(/[^a-z0-9]/g, "");
+
   for (const p of products) {
     if (!p.title) continue;
     // Filter out non-English translations
     if (p.language && !p.language.toLowerCase().includes("english")) continue;
 
-    // Filter out box sets / multi-book collections / samplers
     const rawTitle = String(p.title || "");
+    // Filter out parodies, unofficial guides, summaries, reviews, study guides
+    if (/\b(?:parody|unofficial|summary|review|analysis|guide|study\s+guide)\b/i.test(rawTitle)) {
+      continue;
+    }
+
+    // Filter out box sets / multi-book collections / samplers
     if (/\b(?:collection|box\s*set|boxed\s*set|complete\s*(?:audio\s*)?collection|omnibus|sampler)\b/i.test(rawTitle)) {
       continue;
     }
@@ -87,15 +105,14 @@ async function fetchSeriesFromAudible(seriesName, author = "") {
     const seriesList = Array.isArray(p.series) ? p.series : [];
     const pubSeries = seriesList.find((s) => /publication\s*order|release\s*order/i.test(s.title));
     const chronoSeries = seriesList.find((s) => /chronological|author'?s\s*(?:preferred\s*)?order/i.test(s.title));
-    // Prioritize exact series title match first; only fallback to substring if no product had an exact match
+
+    // Dynamic series match: exact normalized match first, then prefix/substring match
     const matchedSeries =
       seriesList.find((s) => norm(s.title) === normTarget) ||
-      (!hasExactSeriesMatch
-        ? seriesList.find((s) => {
-            const st = norm(s.title);
-            return st.includes(normTarget) || normTarget.includes(st);
-          })
-        : null);
+      seriesList.find((s) => {
+        const st = norm(s.title);
+        return st && normTarget && (st === normTarget || st.startsWith(normTarget) || normTarget.startsWith(st) || st.includes(normTarget) || normTarget.includes(st));
+      });
 
     if (!matchedSeries && !pubSeries && !chronoSeries) continue;
 
@@ -138,8 +155,71 @@ async function fetchSeriesFromAudible(seriesName, author = "") {
       seriesTitle: (matchedSeries && matchedSeries.title) || (chronoSeries && chronoSeries.title) || (pubSeries && pubSeries.title) || seriesName,
     });
   }
+  return candidates;
+}
+
+/**
+ * Dynamically queries Audible Catalog API for products in a series.
+ */
+async function fetchSeriesFromAudible(seriesName, author = "") {
+  const cleanName = cleanSeriesQuery(seriesName);
+  if (!cleanName || cleanName.length < 2) return null;
+
+  const norm = (s) =>
+    String(s || "")
+      .toLowerCase()
+      .replace(/^(?:the|a|an)\s+/i, "")
+      .replace(/\s*[\(\[][^()\[\]]*[\)\]]/g, " ")
+      .replace(/[^a-z0-9]/g, "");
+  const normTarget = norm(cleanName);
+  const normAuthor = norm(author);
+
+  const q = author ? `${cleanName} ${author}` : cleanName;
+  let products = await queryAudibleCatalog(q, "50");
+  if (!products.length && author) {
+    products = await queryAudibleCatalog(cleanName, "50");
+  }
+  if (!products.length) return null;
+
+  let candidates = extractAudibleCandidates(products, normTarget, normAuthor, seriesName, author);
+
+  // If few books found but a canonical series title was detected (e.g. "Percy Jackson and the Olympians" for query "Percy Jackson"),
+  // query Audible with the detected canonical title to retrieve all books in the series.
+  const canonicalCandidate = candidates.find(
+    (c) => c.seriesTitle && norm(c.seriesTitle) !== normTarget && norm(c.seriesTitle).startsWith(normTarget)
+  );
+  if (canonicalCandidate && candidates.length < 6) {
+    const extraProducts = await queryAudibleCatalog(canonicalCandidate.seriesTitle, "50");
+    if (extraProducts.length > 0) {
+      const extraCandidates = extractAudibleCandidates(extraProducts, norm(canonicalCandidate.seriesTitle), normAuthor, canonicalCandidate.seriesTitle, author);
+      candidates = candidates.concat(extraCandidates);
+    }
+  }
 
   if (!candidates.length) return null;
+
+  // Author clustering: if author was not provided by caller, ensure books belong to the dominant series author
+  if (!normAuthor && candidates.length > 1) {
+    const authorCounts = new Map();
+    for (const c of candidates) {
+      const a = norm(c.author);
+      if (a) authorCounts.set(a, (authorCounts.get(a) || 0) + 1);
+    }
+    let dominantAuthor = null;
+    let maxCount = 0;
+    for (const [a, count] of authorCounts.entries()) {
+      if (count > maxCount) {
+        maxCount = count;
+        dominantAuthor = a;
+      }
+    }
+    if (dominantAuthor && maxCount >= 2) {
+      candidates = candidates.filter((c) => {
+        const a = norm(c.author);
+        return !a || a.includes(dominantAuthor) || dominantAuthor.includes(a);
+      });
+    }
+  }
 
   // Deduplicate by clean book title: prefer standard full edition over dramatized/parts, and prefer entries with poster
   const byTitle = new Map();

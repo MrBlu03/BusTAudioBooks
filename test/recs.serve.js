@@ -11,7 +11,7 @@ const path = require("path");
 const { execFileSync, spawn } = require("child_process");
 
 const ROOT = path.join(__dirname, "..");
-const RECS = path.join(ROOT, ".recs.json");
+const TEST_RECS = path.join(ROOT, "test", ".test_recs.json");
 // A high port so it cannot collide with a dev server on 7000.
 const PORT = process.env.SERVE_TEST_PORT || "7099";
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -67,8 +67,6 @@ async function waitForServer(tries = 30) {
   return false;
 }
 
-const had = fs.existsSync(RECS);
-const backup = had ? fs.readFileSync(RECS, "utf8") : null;
 let failed = 0;
 let server = null;
 
@@ -83,14 +81,19 @@ const check = (label, cond, detail) => {
     // list for 30s, and waitForServer() itself requests /manifest.json — so
     // writing afterwards would be read from a cache primed with the real
     // (empty) file.
-    fs.writeFileSync(RECS, JSON.stringify(FAKE, null, 2));
-    console.log("wrote synthetic .recs.json (3 entries, only 1 playable)\n");
+    fs.writeFileSync(TEST_RECS, JSON.stringify(FAKE, null, 2));
+    console.log("wrote synthetic test recs (3 entries, only 1 playable)\n");
 
     server = spawn(process.execPath, [path.join(ROOT, "src", "index.js")], {
       cwd: ROOT,
       stdio: "ignore",
       windowsHide: true,
-      env: { ...process.env, PORT, TORBOX_API_KEY: process.env.TORBOX_API_KEY || "serve-test-fake-key" },
+      env: {
+        ...process.env,
+        PORT,
+        TORBOX_API_KEY: process.env.TORBOX_API_KEY || "serve-test-fake-key",
+        RECS_FILE: TEST_RECS,
+      },
     });
 
     if (!(await waitForServer())) {
@@ -141,9 +144,8 @@ const check = (label, cond, detail) => {
     failed++;
   } finally {
     if (server) server.kill();
-    if (had) fs.writeFileSync(RECS, backup);
-    else if (fs.existsSync(RECS)) fs.unlinkSync(RECS);
-    console.log(`\n${failed ? failed + " CHECK(S) FAILED" : "all checks passed"}; .recs.json restored`);
+    if (fs.existsSync(TEST_RECS)) fs.unlinkSync(TEST_RECS);
+    console.log(`\n${failed ? failed + " CHECK(S) FAILED" : "all checks passed"}; test recs cleaned up`);
   }
   process.exit(failed ? 1 : 0);
 })();

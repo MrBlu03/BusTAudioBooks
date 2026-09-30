@@ -163,3 +163,25 @@ test("recs-scheduler: isDueForRefresh detects missing and expired recs files acc
   assert.equal(isDueForRefresh("nonexistent-file.json"), true);
 });
 
+test("series discovery: captures all books in major series without omissions", async () => {
+  const hp = await fetchSeriesBooks("Harry Potter");
+  assert.ok(hp, "Expected Harry Potter series result");
+  assert.ok(Array.isArray(hp.books), "Expected books array");
+  assert.ok(hp.books.length >= 7, `Expected at least 7 Harry Potter books, got ${hp.books.length}`);
+
+  // Must have books 1 through 7
+  for (let s = 1; s <= 7; s++) {
+    assert.ok(
+      hp.books.some((b) => Math.floor(b.seq) === s),
+      `Expected Harry Potter book with sequence ${s}`
+    );
+  }
+
+  // Percy Jackson multi-query canonical discovery
+  const pj = await fetchSeriesBooks("Percy Jackson");
+  assert.ok(pj, "Expected Percy Jackson series result");
+  assert.ok(Array.isArray(pj.books), "Expected books array");
+  assert.ok(pj.books.length >= 5, `Expected at least 5 Percy Jackson books, got ${pj.books.length}`);
+});
+
+

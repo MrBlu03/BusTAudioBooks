@@ -10,7 +10,7 @@ const path = require("path");
 const { spawn } = require("child_process");
 
 const ROOT = path.join(__dirname, "..");
-const RECS = path.join(ROOT, ".recs.json");
+const TEST_RECS = path.join(ROOT, "test", ".test_recs_series.json");
 const PORT = process.env.SERVE_TEST_PORT || "7098";
 const BASE = `http://127.0.0.1:${PORT}`;
 
@@ -87,12 +87,10 @@ async function waitForServer(tries = 30) {
 }
 
 test("recommended books: series books default to series cards with episodes, standalone books stay single", async () => {
-  const had = fs.existsSync(RECS);
-  const backup = had ? fs.readFileSync(RECS, "utf8") : null;
   let server = null;
 
   try {
-    fs.writeFileSync(RECS, JSON.stringify(FAKE_RECS, null, 2));
+    fs.writeFileSync(TEST_RECS, JSON.stringify(FAKE_RECS, null, 2));
 
     server = spawn(process.execPath, [path.join(ROOT, "src", "index.js")], {
       cwd: ROOT,
@@ -102,6 +100,7 @@ test("recommended books: series books default to series cards with episodes, sta
         ...process.env,
         PORT,
         TORBOX_API_KEY: "test-recs-api-key",
+        RECS_FILE: TEST_RECS,
       },
     });
 
@@ -159,7 +158,6 @@ test("recommended books: series books default to series cards with episodes, sta
     );
   } finally {
     if (server) server.kill();
-    if (had) fs.writeFileSync(RECS, backup);
-    else if (fs.existsSync(RECS)) fs.unlinkSync(RECS);
+    if (fs.existsSync(TEST_RECS)) fs.unlinkSync(TEST_RECS);
   }
 });
