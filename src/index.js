@@ -17,7 +17,7 @@ const { encodeItemId, decodeItemId } = require("./itemid");
 const { TTLCache, pLimit, withTimeout } = require("./cache");
 const { makeAccess } = require("./access");
 const { getBookKey, sortInSeriesOrder, parseSeriesAndBook, cleanDisplayTitle, cleanEpisodeTitle, expandSeriesPacks } = require("./series");
-const { fetchSeriesMeta, fetchSeriesBooks, cleanSeriesQuery } = require("./series_meta");
+const { fetchSeriesMeta, fetchSeriesBooks, cleanSeriesQuery, matchTargetFile } = require("./series_meta");
 const { getCatalogBooks, startCatalogRefresher } = require("./catalogs_meta");
 const torbox = require("./torbox");
 const nuvio = require("./nuvio");
@@ -821,6 +821,23 @@ async function handleCatalog(req, res, extraRaw) {
             seriesCandidate.collectionPoster ||
             (seriesCandidate.books[0] && seriesCandidate.books[0].poster) ||
             undefined;
+
+          const sNameLower = seriesCandidate.seriesName.toLowerCase();
+          const colPacks = expandedItems.filter((r) => {
+            const parsed = r.seriesInfo || parseSeriesAndBook(r.name, r.author, query);
+            return (
+              parsed &&
+              (parsed.isCollection || r.isSeries) &&
+              (r.name.toLowerCase().includes(sNameLower) ||
+                (parsed.seriesName && parsed.seriesName.toLowerCase().includes(sNameLower)))
+            );
+          });
+          const colPack =
+            colPacks.find((r) => r.cached) ||
+            colPacks[0] ||
+            expandedItems.find((r) => r.cached && r.infohash && r.name.toLowerCase().includes(sNameLower)) ||
+            expandedItems.find((r) => r.infohash && r.name.toLowerCase().includes(sNameLower));
+
           seriesCard = {
             id: encodeItemId({
               type: "series",
@@ -828,6 +845,9 @@ async function handleCatalog(req, res, extraRaw) {
               seriesName: seriesCandidate.seriesName,
               name: `${seriesCandidate.seriesName} (Series)`,
               author: sAuthor,
+              parentInfohash: (colPack && colPack.infohash) || undefined,
+              magnet: (colPack && colPack.magnet) || undefined,
+              torrentUrl: (colPack && colPack.torrentUrl) || undefined,
             }),
             type: "series",
             name: `${seriesCandidate.seriesName} Series${sAuthor ? ` — ${sAuthor}` : ""}`,
@@ -932,13 +952,14 @@ async function handleMeta(req, res) {
   const item = decodeItemId(req.params.id);
   if (!item) return res.json({ meta: null });
 
+  const effHash = item.infohash || item.parentInfohash;
   const [meta, isCached, files] = await Promise.all([
     withTimeout(enrich(item.name, "audiobook", item.author), 3500, { poster: null, author: null, description: null, year: null }),
-    item.infohash
-      ? withTimeout(torbox.checkCached(cfg.apiKey, item.infohash), 4000, false)
+    effHash
+      ? withTimeout(torbox.checkCached(cfg.apiKey, effHash), 4000, false)
       : Promise.resolve(false),
-    item.infohash
-      ? withTimeout(torbox.getTorrentFiles(cfg.apiKey, item.infohash), 4000, [])
+    effHash
+      ? withTimeout(torbox.getTorrentFiles(cfg.apiKey, effHash), 4000, [])
       : Promise.resolve([]),
   ]);
 
@@ -957,7 +978,7 @@ async function handleMeta(req, res) {
     try {
       seriesMeta = await withTimeout(
         fetchSeriesMeta(detectedSeriesName, item.author || (meta && meta.author), {
-          infohash: item.parentInfohash || item.infohash,
+          infohash: effHash,
           poster: meta.poster,
           files,
           recommendedBook: item.recommendedBook,
@@ -1065,36 +1086,57 @@ async function resolveForItem(cfg, item) {
   const type = typeOf(item.type);
 
   // If this item represents a series episode from a parent torrent pack, try parent torrent first
-  if (item.parentInfohash && !item.infohash && item.targetFile) {
+  if (item.parentInfohash && !item.infohash && !item.magnet && !item.torrentUrl) {
     try {
-      const parentResult = await resolveForItem(cfg, {
-        ...item,
-        infohash: item.parentInfohash,
-        parentInfohash: undefined,
-      });
+      let resolvedTarget = item.targetFile;
+      if (!resolvedTarget) {
+        const pFiles = await withTimeout(torbox.getTorrentFiles(cfg.apiKey, item.parentInfohash), 2500, []);
+        if (Array.isArray(pFiles) && pFiles.length > 0) {
+          resolvedTarget = matchTargetFile(item, item.bookNumber, pFiles);
+        }
+      }
+      const parentResult = await withTimeout(
+        resolveForItem(cfg, {
+          ...item,
+          infohash: item.parentInfohash,
+          parentInfohash: undefined,
+          targetFile: resolvedTarget,
+        }),
+        6000,
+        null
+      );
       if (parentResult && parentResult.ready && Array.isArray(parentResult.streams) && parentResult.streams.length > 0) {
         return parentResult;
       }
     } catch (_) {}
   }
 
-  // If this item represents a metadata catalog book or series episode without an infohash, dynamically search and resolve the best torrent
-  if (!item.infohash && item.name) {
+  // If this item represents a metadata catalog book or series episode without an infohash/magnet/torrentUrl, dynamically search and resolve the best torrent
+  if (!item.infohash && !item.magnet && !item.torrentUrl && item.name) {
     const bookTitle = cleanDisplayTitle(item.name || "");
     const bookQuery = `${bookTitle} ${item.author || ""}`.trim();
     try {
-      const searchResults = await searchAudiobooks(cfg, bookQuery, 1);
+      const searchResults = await withTimeout(searchAudiobooks(cfg, bookQuery, 1), 3500, []);
       if (Array.isArray(searchResults) && searchResults.length > 0) {
         const hashes = searchResults.map((r) => r.infohash).filter(Boolean);
         let cachedSet = new Set();
         try {
-          if (hashes.length) cachedSet = await torbox.checkCachedMany(cfg.apiKey, hashes);
+          if (hashes.length) cachedSet = await withTimeout(torbox.checkCachedMany(cfg.apiKey, hashes), 2500, new Set());
         } catch (_) {}
+
+        const cleanTarget = cleanDisplayTitle(item.name || "").toLowerCase().replace(/[^a-z0-9]/g, "");
 
         searchResults.sort((a, b) => {
           const ca = a.infohash && cachedSet.has(a.infohash) ? 1 : 0;
           const cb = b.infohash && cachedSet.has(b.infohash) ? 1 : 0;
           if (ca !== cb) return cb - ca;
+
+          const cleanA = cleanDisplayTitle(a.name || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+          const cleanB = cleanDisplayTitle(b.name || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+          const matchA = cleanA.includes(cleanTarget) ? 1 : 0;
+          const matchB = cleanB.includes(cleanTarget) ? 1 : 0;
+          if (matchA !== matchB) return matchB - matchA;
+
           const qa = qualityScore(a);
           const qb = qualityScore(b);
           if (qa !== qb) return qb - qa;
@@ -1103,7 +1145,16 @@ async function resolveForItem(cfg, item) {
 
         const best = searchResults[0];
         if (best) {
-          return await resolveForItem(cfg, { ...best, targetFile: item.targetFile });
+          let resolvedTarget = item.targetFile;
+          if (!resolvedTarget && best.infohash) {
+            try {
+              const files = await withTimeout(torbox.getTorrentFiles(cfg.apiKey, best.infohash), 2500, []);
+              if (Array.isArray(files) && files.length > 0) {
+                resolvedTarget = matchTargetFile(item, item.bookNumber, files);
+              }
+            } catch (_) {}
+          }
+          return await resolveForItem(cfg, { ...best, targetFile: resolvedTarget });
         }
       }
     } catch (err) {
@@ -1111,19 +1162,29 @@ async function resolveForItem(cfg, item) {
     }
   }
 
+  if (!item.infohash && !item.magnet && !item.torrentUrl) {
+    return { ready: false, streams: [], status: `No audio stream found for "${item.name}".` };
+  }
+
   const fallbackKey = `${item.author || ""}::${item.seriesName || ""}::${item.season || ""}::${item.bookNumber || ""}::${item.name || ""}`;
-  const key = streamKey(cfg.apiKey, type, item.infohash || item.torrentUrl || fallbackKey);
+  const streamIdent = (item.infohash || item.torrentUrl || fallbackKey) + (item.targetFile ? `::${item.targetFile}` : "");
+  const key = streamKey(cfg.apiKey, type, streamIdent);
   const cachedStreams = streamCache.get(key);
   if (cachedStreams) return { ready: true, status: "ok", streams: cachedStreams };
 
-  const result = await torbox.resolveStreams(cfg.apiKey, {
-    magnet: item.magnet,
-    infohash: item.infohash,
-    torrentUrl: item.torrentUrl,
-    name: item.name,
-    instantOnly: isInstantOnly(cfg),
-    kind: type === "comic" ? "comic" : "audio",
-  });
+  const result = await withTimeout(
+    torbox.resolveStreams(cfg.apiKey, {
+      magnet: item.magnet,
+      infohash: item.infohash,
+      torrentUrl: item.torrentUrl,
+      name: item.name,
+      instantOnly: isInstantOnly(cfg),
+      kind: type === "comic" ? "comic" : "audio",
+      targetFile: item.targetFile,
+    }),
+    6500,
+    { ready: false, streams: [], status: "TorBox resolution timed out. Try again shortly." }
+  );
   if (result.ready) streamCache.set(key, result.streams);
   return result;
 }
@@ -1144,19 +1205,46 @@ async function handleStream(req, res) {
     if (res.headersSent || req.destroyed) return;
     if (result.ready) {
       let streams = result.streams || [];
-      if (item.targetFile && streams.length > 1) {
-        const tf = item.targetFile.toLowerCase();
-        const getFn = (s) =>
-          ((s.behaviorHints && s.behaviorHints.filename) || s.title || "")
-            .split("\n")[0]
-            .trim()
-            .toLowerCase();
-        const exact = streams.filter((s) => getFn(s) === tf);
-        if (exact.length > 0) {
-          streams = exact;
-        } else {
-          const matched = streams.filter((s) => getFn(s).includes(tf));
-          if (matched.length > 0) streams = matched;
+      if (streams.length > 1) {
+        if (item.targetFile) {
+          const tfLower = String(item.targetFile).toLowerCase().replace(/\\/g, "/");
+          const tfBase = tfLower.split("/").pop();
+          const getFn = (s) =>
+            ((s.behaviorHints && s.behaviorHints.filename) || s.title || "")
+              .split("\n")[0]
+              .trim()
+              .toLowerCase()
+              .replace(/\\/g, "/");
+          const exact = streams.filter((s) => {
+            const fn = getFn(s);
+            const bn = fn.split("/").pop();
+            return fn === tfLower || bn === tfBase;
+          });
+          if (exact.length > 0) {
+            streams = exact;
+          } else {
+            const partial = streams.filter((s) => {
+              const fn = getFn(s);
+              const bn = fn.split("/").pop();
+              return fn.includes(tfBase) || tfLower.includes(bn);
+            });
+            if (partial.length > 0) streams = partial;
+          }
+        }
+
+        // If still > 1 and item.name is present, use matchTargetFile
+        if (streams.length > 1 && item.name) {
+          const streamFileList = streams.map((s) => ({
+            name: ((s.behaviorHints && s.behaviorHints.filename) || s.title || "").split("\n")[0].trim(),
+          }));
+          const matchedName = matchTargetFile(item, item.bookNumber, streamFileList);
+          if (matchedName) {
+            const matchedStream = streams.find((s) => {
+              const fn = ((s.behaviorHints && s.behaviorHints.filename) || s.title || "").split("\n")[0].trim();
+              return fn === matchedName;
+            });
+            if (matchedStream) streams = [matchedStream];
+          }
         }
       }
       return res.json({ streams: decorate(streams) });
@@ -1228,6 +1316,22 @@ app.get("/:config/app/search", async (req, res) => {
             seriesCandidate.collectionPoster ||
             (seriesCandidate.books[0] && seriesCandidate.books[0].poster) ||
             null;
+          const sNameLower = seriesCandidate.seriesName.toLowerCase();
+          const colPacks = expandedItems.filter((r) => {
+            const parsed = r.seriesInfo || parseSeriesAndBook(r.name, r.author, query);
+            return (
+              parsed &&
+              (parsed.isCollection || r.isSeries) &&
+              (r.name.toLowerCase().includes(sNameLower) ||
+                (parsed.seriesName && parsed.seriesName.toLowerCase().includes(sNameLower)))
+            );
+          });
+          const colPack =
+            colPacks.find((r) => r.cached) ||
+            colPacks[0] ||
+            expandedItems.find((r) => r.cached && r.infohash && r.name.toLowerCase().includes(sNameLower)) ||
+            expandedItems.find((r) => r.infohash && r.name.toLowerCase().includes(sNameLower));
+
           seriesAppResult = {
             id: encodeItemId({
               type: "series",
@@ -1235,6 +1339,9 @@ app.get("/:config/app/search", async (req, res) => {
               seriesName: seriesCandidate.seriesName,
               name: `${seriesCandidate.seriesName} (Series)`,
               author: sAuthor,
+              parentInfohash: (colPack && colPack.infohash) || undefined,
+              magnet: (colPack && colPack.magnet) || undefined,
+              torrentUrl: (colPack && colPack.torrentUrl) || undefined,
             }),
             type: "series",
             title: `${seriesCandidate.seriesName} Series${sAuthor ? ` — ${sAuthor}` : ""}`,
@@ -1244,7 +1351,7 @@ app.get("/:config/app/search", async (req, res) => {
             bitrate: null,
             size: 0,
             sizeText: `Full Series (${seriesCandidate.books.length} Books)`,
-            cached: true,
+            cached: !!(colPack && colPack.cached),
             isSeries: true,
           };
         }
@@ -1293,19 +1400,45 @@ app.get("/:config/app/streams/:id", async (req, res) => {
   try {
     const result = await resolveForItem(cfg, item);
     let streams = result.streams || [];
-    if (item.targetFile && streams.length > 1) {
-      const tf = item.targetFile.toLowerCase();
-      const getFn = (s) =>
-        ((s.behaviorHints && s.behaviorHints.filename) || s.title || "")
-          .split("\n")[0]
-          .trim()
-          .toLowerCase();
-      const exact = streams.filter((s) => getFn(s) === tf);
-      if (exact.length > 0) {
-        streams = exact;
-      } else {
-        const matched = streams.filter((s) => getFn(s).includes(tf));
-        if (matched.length > 0) streams = matched;
+    if (streams.length > 1) {
+      if (item.targetFile) {
+        const tfLower = String(item.targetFile).toLowerCase().replace(/\\/g, "/");
+        const tfBase = tfLower.split("/").pop();
+        const getFn = (s) =>
+          ((s.behaviorHints && s.behaviorHints.filename) || s.title || "")
+            .split("\n")[0]
+            .trim()
+            .toLowerCase()
+            .replace(/\\/g, "/");
+        const exact = streams.filter((s) => {
+          const fn = getFn(s);
+          const bn = fn.split("/").pop();
+          return fn === tfLower || bn === tfBase;
+        });
+        if (exact.length > 0) {
+          streams = exact;
+        } else {
+          const partial = streams.filter((s) => {
+            const fn = getFn(s);
+            const bn = fn.split("/").pop();
+            return fn.includes(tfBase) || tfLower.includes(bn);
+          });
+          if (partial.length > 0) streams = partial;
+        }
+      }
+
+      if (streams.length > 1 && item.name) {
+        const streamFileList = streams.map((s) => ({
+          name: ((s.behaviorHints && s.behaviorHints.filename) || s.title || "").split("\n")[0].trim(),
+        }));
+        const matchedName = matchTargetFile(item, item.bookNumber, streamFileList);
+        if (matchedName) {
+          const matchedStream = streams.find((s) => {
+            const fn = ((s.behaviorHints && s.behaviorHints.filename) || s.title || "").split("\n")[0].trim();
+            return fn === matchedName;
+          });
+          if (matchedStream) streams = [matchedStream];
+        }
       }
     }
     return res.json({

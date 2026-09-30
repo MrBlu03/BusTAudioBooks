@@ -94,7 +94,7 @@ async function tbFetch(path, { apiKey, method = "GET", body, query, headers } = 
     method,
     headers: Object.keys(reqHeaders).length > 0 ? reqHeaders : undefined,
     body,
-    signal: AbortSignal.timeout(15000),
+    signal: AbortSignal.timeout(6000),
   });
   let json;
   try {
@@ -298,7 +298,7 @@ function formatBytes(bytes) {
 // Returns { ready: boolean, streams: [...], status: string }
 //   ready === false means TorBox is still downloading an uncached torrent; the
 //   caller should surface a "preparing" message and let the user retry.
-async function resolveStreams(apiKey, { magnet, infohash, name, torrentUrl, instantOnly = false, kind = "audio" }) {
+async function resolveStreams(apiKey, { magnet, infohash, name, torrentUrl, instantOnly = false, kind = "audio", targetFile }) {
   let hash = infohash ? infohash.toLowerCase() : infohashFromMagnet(magnet);
   if (!hash && !magnet && !torrentUrl) {
     throw new Error("No infohash, magnet, or torrent link provided");
@@ -404,10 +404,25 @@ async function resolveStreams(apiKey, { magnet, infohash, name, torrentUrl, inst
       )
     );
 
+  // If a specific targetFile is requested, resolve only that file to save latency and avoid requesting download links for dozens of unrelated files
+  let filesToResolve = matchedFiles;
+  if (targetFile) {
+    const tfLower = String(targetFile).toLowerCase().replace(/\\/g, "/");
+    const tfBase = tfLower.split("/").pop();
+    const targeted = matchedFiles.filter((f) => {
+      const fn = String(f.name || f.short_name || "").toLowerCase().replace(/\\/g, "/");
+      const bn = fn.split("/").pop();
+      return fn === tfLower || bn === tfBase || fn.includes(tfBase) || tfLower.includes(bn);
+    });
+    if (targeted.length > 0) {
+      filesToResolve = targeted;
+    }
+  }
+
   // Request links concurrently (bounded) — a loose-image comic can have
   // hundreds of page files, and doing these serially would take minutes.
   const resolved = await Promise.all(
-    matchedFiles.map((file) =>
+    filesToResolve.map((file) =>
       limitRequestDl(async () => {
         try {
           return { file, url: await requestDownloadLink(apiKey, torrent.id, file.id) };

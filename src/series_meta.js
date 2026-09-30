@@ -589,26 +589,83 @@ async function fetchSeriesBooks(seriesName, author = "") {
   return result;
 }
 
-function matchTargetFile(book, bookNum, files, recommendedBook) {
+function matchTargetFile(book, bookNum, files, recommendedBook, allBooks = []) {
   if (!Array.isArray(files) || files.length === 0) return undefined;
-  const lowerBookTitle = book.title.toLowerCase();
-  const matched = files.find((f) => {
-    const fn = (f.name || f.short_name || "").toLowerCase();
-    if (fn.includes(lowerBookTitle)) return true;
-    if (bookNum != null) {
-      const numPadded = bookNum < 10 ? `0${bookNum}` : `${bookNum}`;
-      const numRegex = new RegExp(`(?:^|[\\s._\\-])0?${bookNum}(?:[\\s._\\-]|$)`, "i");
-      if (fn.includes(numPadded) || numRegex.test(fn)) return true;
+  const targetTitle = typeof book === "string" ? book : (book && book.title) || "";
+  const cleanTarget = cleanDisplayTitle(targetTitle).toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (!cleanTarget) return undefined;
+
+  // Collect other distinguishing words from other books in the same series dynamically
+  const otherWords = new Set();
+  if (Array.isArray(allBooks) && allBooks.length > 1) {
+    const targetWords = new Set(targetTitle.toLowerCase().split(/\W+/).filter(Boolean));
+    for (const b of allBooks) {
+      const bTitle = typeof b === "string" ? b : (b && b.title) || "";
+      if (!bTitle || bTitle.toLowerCase() === targetTitle.toLowerCase()) continue;
+      for (const w of bTitle.toLowerCase().split(/\W+/).filter((x) => x.length > 3)) {
+        if (!targetWords.has(w)) otherWords.add(w);
+      }
     }
-    return false;
-  });
-  if (matched) return matched.name || matched.short_name;
+  }
+
+  let bestFile = null;
+  let bestScore = -1;
+
+  for (const f of files) {
+    const rawName = String(f.name || f.short_name || "");
+    const cleanFn = cleanEpisodeTitle(rawName).toLowerCase().replace(/[^a-z0-9]/g, "");
+    const baseFn = rawName.split(/[/\\]/).pop().toLowerCase();
+    let score = 0;
+
+    // 1. Exact cleaned title match (highest confidence)
+    if (cleanFn === cleanTarget) {
+      score = 1000;
+    } else if (cleanFn.startsWith(cleanTarget) || cleanTarget.startsWith(cleanFn)) {
+      // Substring match: check length ratio to prevent 'foundation' matching 'preludetofoundation'
+      const minLen = Math.min(cleanFn.length, cleanTarget.length);
+      const maxLen = Math.max(cleanFn.length, cleanTarget.length);
+      if (minLen / maxLen >= 0.75) {
+        score = 800;
+      }
+    }
+
+    // 2. Word-boundary regex match in basename
+    if (score === 0) {
+      const escaped = targetTitle.toLowerCase().replace(/[-[\]{}()*+?.,\\^$|#\s]/g, "\\$&");
+      if (new RegExp("\\b" + escaped + "\\b", "i").test(baseFn)) {
+        // Penalty if it matches distinguishing words of other books in the same series
+        const hasOther = [...otherWords].some((w) => baseFn.includes(w));
+        if (!hasOther) {
+          score = 600;
+        }
+      }
+    }
+
+    // 3. Fallback to canonical sequence number (e.g. book.seq)
+    if (score === 0 && book && book.seq != null) {
+      const numPadded = book.seq < 10 ? "0" + book.seq : "" + book.seq;
+      const numRegex = new RegExp("(?:^|[\\s._\\-])0?" + book.seq + "(?:[\\s._\\-]|$)");
+      if (baseFn.includes(numPadded) || numRegex.test(baseFn)) {
+        score = 300;
+      }
+    }
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestFile = f.name || f.short_name;
+    }
+  }
+
+  if (bestScore >= 300) return bestFile;
+
   if (files.length === 1 && recommendedBook) {
     const recLower = String(recommendedBook).toLowerCase().trim();
-    if (lowerBookTitle.includes(recLower) || recLower.includes(lowerBookTitle)) {
+    const tLower = targetTitle.toLowerCase();
+    if (tLower.includes(recLower) || recLower.includes(tLower)) {
       return files[0].name || files[0].short_name;
     }
   }
+
   return undefined;
 }
 
@@ -647,12 +704,12 @@ async function fetchSeriesMeta(seriesName, author = "", extraMeta = {}) {
         id: encodeItemId({
           type: "series",
           seriesName: cleanName,
-          bookNumber: epNum,
+          bookNumber: book.seq != null ? book.seq : epNum,
           season: 1,
           name: book.title,
           author: book.author || effAuthor,
           parentInfohash: extraMeta.infohash || undefined,
-          targetFile: matchTargetFile(book, epNum, files, recBook),
+          targetFile: matchTargetFile(book, epNum, files, recBook, chronoBooks),
           isSeries: true,
         }),
         title: `Book ${epNum}${yearLabel}: ${book.title}`,
@@ -671,12 +728,12 @@ async function fetchSeriesMeta(seriesName, author = "", extraMeta = {}) {
         id: encodeItemId({
           type: "series",
           seriesName: cleanName,
-          bookNumber: epNum,
+          bookNumber: book.seq != null ? book.seq : epNum,
           season: 2,
           name: book.title,
           author: book.author || effAuthor,
           parentInfohash: extraMeta.infohash || undefined,
-          targetFile: matchTargetFile(book, epNum, files, recBook),
+          targetFile: matchTargetFile(book, epNum, files, recBook, chronoBooks),
           isSeries: true,
         }),
         title: `Book ${epNum}: ${book.title}`,
@@ -703,7 +760,7 @@ async function fetchSeriesMeta(seriesName, author = "", extraMeta = {}) {
           name: book.title,
           author: book.author || effAuthor,
           parentInfohash: extraMeta.infohash || undefined,
-          targetFile: matchTargetFile(book, epNum, files, recBook),
+          targetFile: matchTargetFile(book, epNum, files, recBook, chronoBooks),
           isSeries: true,
         }),
         title: `Book ${epNum}: ${book.title}`,
@@ -754,5 +811,6 @@ module.exports = {
   fetchSeriesWikiExtract,
   findCollectionCover,
   cleanSeriesQuery,
+  matchTargetFile,
   _seriesCache: seriesCache,
 };

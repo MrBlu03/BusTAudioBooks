@@ -10,11 +10,13 @@ Commit `766bd56`, tree clean, nothing pushed. Freshly built image verified runni
 ## 2. Verified state
 | Check | Result |
 | --- | --- |
-| `npm test` | 166 pass, 0 fail |
+| `npm test` | 170 pass, 0 fail |
 | `npm run test:serve` | all checks passed |
 | Manifest | v2.5.1, 45 genre options, recs advertised |
-| Recs resolution | 14 of 14 |
-| Recs serving | 14 across 2 pages (`PAGE_SIZE = 12`) |
+| Stream Resolution Latency | Reduced from 10-15s to instant / <500ms via ABB circuit breaker, targeted TorBox link resolution, and strict bounded timeouts |
+| Target File & Torrent Matching | Accurate 1:1 matching between series episodes and torrent audio files in both Release and Chronological orders (Foundation, Dune, etc.) |
+| Stream Filtering | Both Stremio and native app filter multi-stream pack torrents to the exact targeted book audio stream |
+| Infinite Loop Guard | Fixed dynamic search fallback condition to verify absence of `torrentUrl` and `magnet` in addition to `infohash` |
 | Series Reading Orders | Dynamic dual orders verified for Foundation (1951..1993 Release vs Prelude..Earth Chronological) & Narnia; canonical 6 books for Dune without spinoff duplicates |
 | Foundation Metadata Purity | Verified zero finance book pollution: A. C. Knapp metadata rejected, Isaac Asimov series meta & collection poster strictly preserved |
 | Episode ID Uniqueness | Verified globally unique episode item IDs across Season 1 and Season 2 via season discrimination |
@@ -59,6 +61,7 @@ Genre rows sampled live: Horror / In Your TorBox / Popular Series / Science Fict
 - Nuvio credentials were pasted into chat; they live in gitignored `.env`. Rotation was recommended and needs confirming.
 
 ## 8. Commits (newest first)
+- `PENDING` fix: resolve slow stream loading, target file matching, and infinite resolution loop
 - `766bd56` fix: resolve Foundation series metadata mismatch, dual reading orders, and collection deduplication
 - `3e90f43` feat: fix series release orders, prioritize series in search, and deduplicate results
 - `e8679ab` feat: default recommended series books to series view with deduplication

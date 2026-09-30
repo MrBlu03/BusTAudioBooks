@@ -122,6 +122,21 @@ function comicQualityScore(item) {
 // ABB rotates domains often and occasionally changes its HTML. The domain is
 // configurable (per-user in the configure page, or via the ABB_DOMAIN env var)
 // so you can point at the current working one without editing code.
+let abbLastFailureTime = 0;
+const ABB_FAILURE_COOLDOWN_MS = 5 * 60 * 1000; // 5 min cooldown when down
+
+function isAbbAvailable() {
+  return Date.now() - abbLastFailureTime >= ABB_FAILURE_COOLDOWN_MS;
+}
+
+function markAbbFailure() {
+  abbLastFailureTime = Date.now();
+}
+
+function markAbbSuccess() {
+  abbLastFailureTime = 0;
+}
+
 function abbDomain(config) {
   const raw = (config.abbDomain || process.env.ABB_DOMAIN || "").trim();
   if (!raw) return null;
@@ -236,7 +251,7 @@ function buildMagnet(infohash, trackers, name) {
 
 async function searchAudiobookBay(config, query, page = 1) {
   const domain = abbDomain(config);
-  if (!domain) return []; // not configured
+  if (!domain || !isAbbAvailable()) return []; // not configured or temporarily unreachable
 
   const pagePath = page > 1 ? `/page/${page}` : "";
   const listUrl = query
@@ -245,8 +260,10 @@ async function searchAudiobookBay(config, query, page = 1) {
   let listHtml;
   try {
     listHtml = await abbFetch(listUrl, listCache);
+    markAbbSuccess();
   } catch (err) {
-    console.error("ABB list fetch failed:", err.message);
+    markAbbFailure();
+    console.warn("ABB list fetch failed, cooling down for 5m:", err.message);
     return [];
   }
 
