@@ -344,8 +344,9 @@ async function fromWikipedia(title, author) {
 // art, and the remaining providers return verifiable matches.
 
 // Returns { poster, author, description, year, genres } — always resolves, never throws.
-async function enrich(raw, type = "audiobook") {
+async function enrich(raw, type = "audiobook", hintAuthor = null) {
   const name = String(raw || "").toLowerCase().trim();
+  const effHint = hintAuthor ? String(hintAuthor).trim() : null;
   if (!name) {
     return {
       poster: null, author: null, description: null, year: null, genres: [],
@@ -354,11 +355,12 @@ async function enrich(raw, type = "audiobook") {
     };
   }
 
-  const key = `${type}:${name}`;
+  const key = `${type}:${name}:${effHint ? effHint.toLowerCase() : ""}`;
   const hit = metaCache.get(key);
   if (hit !== undefined) return hit;
 
-  const { title, author } = parseNameParts(raw, type);
+  const { title, author: parsedAuthor } = parseNameParts(raw, type);
+  const author = parsedAuthor || effHint || null;
   let result = {
     poster: null, author: author || null, description: null, year: null, genres: [],
     narrator: null, duration: null, series: null, seriesIndex: null,

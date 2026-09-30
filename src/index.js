@@ -12,7 +12,7 @@ const { resolveGenre } = genres;
 const { getRecs, hasRecs } = require("./recs");
 const { decodeConfig } = require("./config");
 const { searchAudiobooks, searchComics, qualityScore, comicQualityScore } = require("./sources");
-const { enrich } = require("./metadata");
+const { enrich, parseNameParts } = require("./metadata");
 const { encodeItemId, decodeItemId } = require("./itemid");
 const { TTLCache, pLimit, withTimeout } = require("./cache");
 const { makeAccess } = require("./access");
@@ -486,7 +486,12 @@ async function runSearch(cfg, query, page, type = "audiobook") {
   const enriched = await Promise.all(
     results.map((r) =>
       limitMeta(async () => {
-        const meta = await withTimeout(enrich(r.name, type), 2500, { poster: null, author: null });
+        const parts = parseNameParts(r.name, type);
+        const meta = await withTimeout(
+          enrich(r.name, type, parts.author || r.author),
+          2500,
+          { poster: null, author: null }
+        );
         return {
           ...r,
           poster: meta.poster || null,
@@ -838,6 +843,9 @@ async function handleCatalog(req, res, extraRaw) {
   // Deduplicate releases so each distinct book appears only once (Option A),
   // keeping the highest quality / instant-cached release per book.
   const seenBooks = new Set();
+  if (isQueryingSeries && seriesCandidate) {
+    seenBooks.add(`${seriesCandidate.seriesName.toLowerCase()}:collection:all`);
+  }
   const deduped = [];
   for (const r of expandedItems) {
     if (!r.seriesInfo) r.seriesInfo = parseSeriesAndBook(r.name, r.author, searchQuery);
@@ -860,7 +868,12 @@ async function handleCatalog(req, res, extraRaw) {
   await Promise.all(
     paged.map(async (r) => {
       if (!r.poster) {
-        const meta = await withTimeout(enrich(r.name, "audiobook"), 2000, null).catch(() => null);
+        const parts = parseNameParts(r.name, "audiobook");
+        const meta = await withTimeout(
+          enrich(r.name, "audiobook", parts.author || r.author),
+          2000,
+          null
+        ).catch(() => null);
         if (meta && meta.poster) {
           r.poster = meta.poster;
           if (!r.author && meta.author) r.author = meta.author;
@@ -920,7 +933,7 @@ async function handleMeta(req, res) {
   if (!item) return res.json({ meta: null });
 
   const [meta, isCached, files] = await Promise.all([
-    withTimeout(enrich(item.name), 3500, { poster: null, author: null, description: null, year: null }),
+    withTimeout(enrich(item.name, "audiobook", item.author), 3500, { poster: null, author: null, description: null, year: null }),
     item.infohash
       ? withTimeout(torbox.checkCached(cfg.apiKey, item.infohash), 4000, false)
       : Promise.resolve(false),
@@ -949,7 +962,7 @@ async function handleMeta(req, res) {
           files,
           recommendedBook: item.recommendedBook,
         }),
-        4500,
+        7000,
         null
       );
       if (seriesMeta && Array.isArray(seriesMeta.videos) && seriesMeta.videos.length > 0) {
@@ -1001,10 +1014,12 @@ async function handleMeta(req, res) {
   } else if (videos && videos.length > 1) {
     descParts.push(`📖 Series / Multi-Part Audio Collection (${videos.length} Episodes/Books)`);
   }
-  if (meta.author) descParts.push(`By ${meta.author}`);
-  if (meta.narrator) descParts.push(`Narrated by ${meta.narrator}`);
-  if (meta.series) descParts.push(`Series: ${meta.seriesIndex ? `${meta.series} #${meta.seriesIndex}` : meta.series}`);
-  if (meta.description) descParts.push(meta.description);
+  if (!seriesMeta) {
+    if (meta.author) descParts.push(`By ${meta.author}`);
+    if (meta.narrator) descParts.push(`Narrated by ${meta.narrator}`);
+    if (meta.series) descParts.push(`Series: ${meta.seriesIndex ? `${meta.series} #${meta.seriesIndex}` : meta.series}`);
+    if (meta.description) descParts.push(meta.description);
+  }
   if (facts) descParts.push(facts);
   const description = descParts.filter(Boolean).join("\n\n");
 
@@ -1036,8 +1051,8 @@ async function handleMeta(req, res) {
       genres: seriesMeta && Array.isArray(seriesMeta.genres) ? [...new Set([...seriesMeta.genres, ...genres])] : genres,
       // Stremio has no narrator field; `director` is the closest slot, and it
       // is what most audio addons abuse for this. `cast` keeps the author.
-      director: meta.narrator ? [meta.narrator] : undefined,
-      cast: meta.author ? [meta.author] : undefined,
+      director: !seriesMeta && meta.narrator ? [meta.narrator] : undefined,
+      cast: (seriesMeta && seriesMeta.cast) || (meta.author ? [meta.author] : undefined),
       videos,
     },
   });

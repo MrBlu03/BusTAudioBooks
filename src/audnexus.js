@@ -22,7 +22,8 @@ function cleanTitleForSearch(title) {
     .replace(/\[[^\]]*\]/g, " ")
     .replace(/\([^)]*\)/g, " ")
     .replace(/\{[^}]*\}/g, " ")
-    .replace(/\b(?:complete|series|collection|saga|trilogy|set|audiobooks?|unabridged|abridged)\b/gi, " ")
+    .replace(/\b0?\d+\s*[-–—to]+\s*0?\d+\b/gi, " ")
+    .replace(/\b(?:complete|series|collection|saga|trilogy|set|audiobooks?|unabridged|abridged|box\s*set)\b/gi, " ")
     .replace(/[_]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
@@ -36,28 +37,59 @@ async function findAsin(title, author) {
   const cleanTitle = cleanTitleForSearch(title);
   if (!cleanTitle || cleanTitle.length < 2) return null;
 
+  const norm = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  const normTitle = norm(cleanTitle);
+  const normAuthor = norm(author);
+
   const tryQuery = async (t, a) => {
     const params = new URLSearchParams({
       title: t,
-      num_results: "3",
+      num_results: "6",
+      response_groups: "product_desc,contributors",
       products_sort_by: "Relevance",
     });
     if (a) params.set("author", a);
 
     const res = await fetch(`${AUDIBLE_BASE}?${params.toString()}`, {
-      headers: { Accept: "application/json", "User-Agent": "bustaudio-addon/2.4" },
+      headers: { Accept: "application/json", "User-Agent": "bustaudio-addon/2.5" },
       signal: AbortSignal.timeout(2500),
     });
     if (!res.ok) return null;
     const data = await res.json();
     const products = Array.isArray(data.products) ? data.products : [];
     if (!products.length) return null;
-    return products[0].asin || null;
+
+    // Filter to products whose title matches the queried title
+    const match = products.find((p) => {
+      if (!p || !p.title) return false;
+      const pt = norm(p.title);
+      const titleMatches = pt === normTitle || pt.startsWith(normTitle) || normTitle.startsWith(pt);
+      if (!titleMatches) return false;
+      if (a) {
+        const pAuthors = (p.authors || []).map((au) => norm(au.name));
+        return pAuthors.some((pa) => pa.includes(normAuthor) || normAuthor.includes(pa));
+      }
+      return true;
+    });
+
+    if (match) return match.asin || null;
+
+    // Secondary fallback: if author was specified and matches, accept if title includes keywords
+    if (a) {
+      const authorMatch = products.find((p) => {
+        if (!p || !p.title) return false;
+        const pAuthors = (p.authors || []).map((au) => norm(au.name));
+        return pAuthors.some((pa) => pa.includes(normAuthor) || normAuthor.includes(pa));
+      });
+      if (authorMatch) return authorMatch.asin || null;
+    }
+
+    return null;
   };
 
   try {
     let asin = author ? await tryQuery(cleanTitle, author) : null;
-    if (!asin) asin = await tryQuery(cleanTitle, null);
+    if (!asin && cleanTitle.length >= 3) asin = await tryQuery(cleanTitle, null);
     return asin;
   } catch (_) {
     return null;

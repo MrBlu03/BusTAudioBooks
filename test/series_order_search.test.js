@@ -42,6 +42,38 @@ test("Foundation series has correct dual reading orders (Release 1951..1993 vs C
   assert.ok(meta.description.includes("Dual Reading Orders Available"), "Expected dual reading orders in description");
   assert.ok(meta.description.includes("Season 1: Release / Publication Order"), "Expected Season 1 description");
   assert.ok(meta.description.includes("Season 2: Chronological Story Order"), "Expected Season 2 description");
+
+  // Ensure NO finance book metadata pollution
+  assert.ok(!meta.description.includes("Scaling Your Business"), "Must not include finance book description");
+  assert.ok(!meta.description.includes("A. C. Knapp"), "Must not include A. C. Knapp");
+  assert.equal(meta.cast?.[0], "Isaac Asimov", "Cast must be Isaac Asimov");
+});
+
+test("fetchSeriesWikiExtract extracts Wikipedia series summary for Foundation", async () => {
+  const { fetchSeriesWikiExtract } = require("../src/series_meta");
+  const extract = await fetchSeriesWikiExtract("Foundation", "Isaac Asimov");
+  assert.ok(extract, "Expected extract from Wikipedia series summary");
+  assert.ok(extract.includes("1951"), "Expected 1951 in summary extract");
+  assert.ok(extract.includes("Isaac Asimov"), "Expected Isaac Asimov in summary extract");
+});
+
+test("audnexus findAsin resolves Isaac Asimov's Foundation and rejects unrelated finance book", async () => {
+  const audnexus = require("../src/audnexus");
+  const m = await audnexus.lookupAudnexus("Foundation", "Isaac Asimov");
+  assert.ok(m, "Expected Audnexus match for Foundation");
+  assert.ok(m.title.toLowerCase().includes("foundation"), "Title should contain Foundation");
+  assert.ok(m.author.toLowerCase().includes("asimov"), "Author must be Isaac Asimov");
+  assert.ok(!m.author.includes("Knapp"), "Author must NOT be Knapp");
+  assert.ok(!m.description?.includes("Scaling Your Business"), "Description must not be finance book");
+});
+
+test("fetchSeriesMeta prioritizes collectionPoster over extraMeta.poster", async () => {
+  const fakeWrongPoster = "https://example.com/finance-book-cover.jpg";
+  const meta = await fetchSeriesMeta("Foundation", "Isaac Asimov", {
+    poster: fakeWrongPoster,
+  });
+  assert.ok(meta, "Expected series meta");
+  assert.notEqual(meta.poster, fakeWrongPoster, "Series poster should be collection poster, not extraMeta.poster");
 });
 
 test("Dune series resolves Frank Herbert canonical 6 books without Brian Herbert duplicates", async () => {

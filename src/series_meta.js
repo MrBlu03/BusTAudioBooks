@@ -335,6 +335,49 @@ async function findCollectionCover(seriesName, author = "") {
 }
 
 const pubYearCache = new TTLCache(24 * 60 * 60 * 1000, 2000);
+const wikiSeriesCache = new TTLCache(24 * 60 * 60 * 1000, 500);
+
+/**
+ * Fast dynamic extraction of publication years directly from Wikipedia Series summary.
+ * Resolves dates for an entire book series in a single HTTP request (~250ms).
+ */
+async function fetchSeriesWikiExtract(seriesName, author = "") {
+  if (!seriesName) return null;
+  const cleanName = cleanSeriesQuery(seriesName);
+  const cacheKey = `${cleanName.toLowerCase()}|${String(author || "").toLowerCase()}`;
+  const hit = wikiSeriesCache.get(cacheKey);
+  if (hit !== undefined) return hit;
+
+  const slugs = [
+    cleanName.replace(/\s+/g, "_") + "_series",
+    cleanName.replace(/\s+/g, "_") + "_(novel_series)",
+    cleanName.replace(/\s+/g, "_") + "_(series)",
+    cleanName.replace(/\s+/g, "_") + "_(franchise)",
+    cleanName.replace(/\s+/g, "_"),
+  ];
+
+  for (const slug of slugs) {
+    try {
+      const res = await fetch(
+        "https://en.wikipedia.org/api/rest_v1/page/summary/" + encodeURIComponent(slug),
+        {
+          headers: { "User-Agent": "bustaudio-addon/2.5 (contact@bustaudio.app)" },
+          signal: AbortSignal.timeout(2000),
+        }
+      );
+      if (res.ok) {
+        const d = await res.json();
+        if (d.extract && !d.extract.includes("may refer to:")) {
+          wikiSeriesCache.set(cacheKey, d.extract);
+          return d.extract;
+        }
+      }
+    } catch (_) {}
+  }
+
+  wikiSeriesCache.set(cacheKey, null);
+  return null;
+}
 
 /**
  * Dynamically queries Wikipedia Summary API and Open Library for a book's original publication year.
@@ -352,7 +395,7 @@ async function fetchPublicationYear(title, author) {
     const q = `"${title}" ${author || ""}`;
     const sRes = await fetch("https://en.wikipedia.org/w/api.php?action=query&list=search&format=json&srlimit=5&srsearch=" + encodeURIComponent(q), {
       headers: { "User-Agent": "BusTAudioBooks/2.5 (contact@github.com)" },
-      signal: AbortSignal.timeout(1800),
+      signal: AbortSignal.timeout(2500),
     });
     if (sRes.ok) {
       const sData = await sRes.json();
@@ -456,20 +499,42 @@ async function fetchSeriesBooks(seriesName, author = "") {
     if (seriesObj && Array.isArray(seriesObj.books) && seriesObj.books.length > 0) {
       const hasPubSeq = seriesObj.books.some((b) => b.pubSeq != null);
       if (!hasPubSeq) {
-        // Enrich books concurrently with publication years
-        const booksToEnrich = seriesObj.books.slice(0, 8);
-        await Promise.all(
-          booksToEnrich.map(async (b) => {
-            if (!b.originalYear) {
+        // 1. Fast path: try Wikipedia series extract in a single call (~250ms)
+        try {
+          const wikiExtract = await withTimeout(
+            fetchSeriesWikiExtract(seriesObj.seriesName || seriesName, seriesObj.author || author),
+            1800,
+            null
+          );
+          if (wikiExtract) {
+            for (const b of seriesObj.books) {
+              if (!b.originalYear) {
+                const esc = b.title.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, "\\$&");
+                const m1 = wikiExtract.match(new RegExp(`${esc}\\s*\\((\\d{4})\\)`, "i"));
+                const m2 = !m1 && wikiExtract.match(new RegExp(`${esc}[^.]{1,50}?\\b(18\\d\\d|19\\d\\d|20[0-2]\\d)\\b`, "i"));
+                const yr = m1 ? parseInt(m1[1], 10) : (m2 ? parseInt(m2[1], 10) : null);
+                if (yr && yr >= 1800 && yr <= new Date().getFullYear()) {
+                  b.originalYear = yr;
+                }
+              }
+            }
+          }
+        } catch (_) {}
+
+        // 2. Secondary fallback: enrich remaining books concurrently with individual publication years
+        const booksToEnrich = seriesObj.books.filter((b) => !b.originalYear).slice(0, 8);
+        if (booksToEnrich.length > 0) {
+          await Promise.all(
+            booksToEnrich.map(async (b) => {
               const y = await withTimeout(
                 fetchPublicationYear(b.title, b.author || seriesObj.author || author),
-                1500,
+                3500,
                 null
               );
               if (y) b.originalYear = y;
-            }
-          })
-        );
+            })
+          );
+        }
       }
 
       // Chronological reading order (in-universe sequence)
@@ -485,9 +550,15 @@ async function fetchSeriesBooks(seriesName, author = "") {
           const pa = a.pubSeq != null ? a.pubSeq : 999;
           const pb = b.pubSeq != null ? b.pubSeq : 999;
           if (pa !== pb) return pa - pb;
-        } else if (a.originalYear != null && b.originalYear != null && a.originalYear !== b.originalYear) {
-          return a.originalYear - b.originalYear;
         }
+
+        const ya = a.originalYear != null ? a.originalYear : null;
+        const yb = b.originalYear != null ? b.originalYear : null;
+        if (ya != null && yb != null && ya !== yb) {
+          return ya - yb;
+        }
+        if (ya != null && yb == null) return -1;
+        if (ya == null && yb != null) return 1;
 
         const sa = a.chronoSeq != null ? a.chronoSeq : (a.seq != null ? a.seq : 999);
         const sb = b.chronoSeq != null ? b.chronoSeq : (b.seq != null ? b.seq : 999);
@@ -559,9 +630,9 @@ async function fetchSeriesMeta(seriesName, author = "", extraMeta = {}) {
     : `${cleanName} (Audiobook Series)`;
 
   const masterPoster =
-    extraMeta.poster ||
     (seriesData && seriesData.collectionPoster) ||
     (chronoBooks[0] && chronoBooks[0].poster) ||
+    extraMeta.poster ||
     undefined;
 
   let videos = [];
@@ -680,6 +751,7 @@ async function fetchSeriesMeta(seriesName, author = "", extraMeta = {}) {
 module.exports = {
   fetchSeriesBooks,
   fetchSeriesMeta,
+  fetchSeriesWikiExtract,
   findCollectionCover,
   cleanSeriesQuery,
   _seriesCache: seriesCache,
