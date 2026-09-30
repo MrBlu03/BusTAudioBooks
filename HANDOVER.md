@@ -1,5 +1,5 @@
 # BusTAudioBooks — Handover Brief
-Commit `af80740`, tree clean, nothing pushed. Freshly built image verified running in the container.
+Commit `e8679ab`, tree clean, nothing pushed. Freshly built image verified running in the container.
 
 ## 1. Standing constraints — do not break these
 - **No GitHub work.** `AFK-Goblin` is not the user's account. Commits stay local on `main`. Never push, create a repo, or install `gh`.
@@ -10,11 +10,12 @@ Commit `af80740`, tree clean, nothing pushed. Freshly built image verified runni
 ## 2. Verified state
 | Check | Result |
 | --- | --- |
-| `npm test` | 153 pass, 0 fail |
+| `npm test` | 154 pass, 0 fail |
 | `npm run test:serve` | all checks passed |
 | Manifest | v2.5.1, 45 genre options, recs advertised |
 | Recs resolution | 14 of 14 |
 | Recs serving | 14 across 2 pages (`PAGE_SIZE = 12`) |
+| Recs series view | Series books default to series cards with episodes; standalone books remain single items |
 | Containers | `backend`, `jackett`, `flaresolverr`, `warp` — all Up |
 
 Genre rows sampled live: Horror / In Your TorBox / Popular Series / Science Fiction / Stephen King / Recommended For You all return n=12; recs page 2 returns n=2. Recs by source: 8 infohash, 0 magnet, 6 torrentUrl.
@@ -37,7 +38,7 @@ Genre rows sampled live: Horror / In Your TorBox / Popular Series / Science Fict
 ## 5. Open items
 1. **The original 400 needs the user.** `TORBOX_API_KEY` is empty and the install URL carries no config → every `/catalog` and `/meta` returns "Missing or invalid configuration. Re-install the addon." Fix is re-installing via `/configure`. Config gotcha that cost me time: the key is a base64url path segment with field `apiKey` (camelCase), not `torbox_api_key`, and not a `config=` query param. A 400 with a well-formed config almost always means the wrong field name.
 2. **Genre seeds unverified.** `test/genres.live.js` walks all 44 but never completed — earlier probing got rate-limited. Worth running now that Jackett works.
-3. **Recs row shows release names, not book titles — leaks index tags:** "The Way of Kings (Stormlight Archive book 01) by Brandon Sanders ...", "Robert Heinlein - The Moon is a Harsh Mistress". `src/index.js` prefers `rec.release.name` over the clean `rec.title`. Cosmetic, but the most visible rough edge. Not fixed.
+3. **Recs row display names cleaned:** `src/index.js` uses `prettyName(rec.title)` so clean book names are shown instead of raw index tags.
 4. **`flaresolverr` is unused** — healthy at `http://flaresolverr:8191`, no code references it despite the compose comment. Confirm before removing.
 5. **Recs aren't user-specific at serve time** — one shared `.recs.json`, so on a shared install everyone's row is the credential owner's.
 
@@ -53,6 +54,7 @@ Genre rows sampled live: Horror / In Your TorBox / Popular Series / Science Fict
 - Nuvio credentials were pasted into chat; they live in gitignored `.env`. Rotation was recommended and needs confirming.
 
 ## 8. Commits (newest first)
+- `e8679ab` feat: default recommended series books to series view with deduplication
 - `af80740` feat: implement dual chronological and release reading orders and daily recommendation refresh
 - `9cddef2` feat: implement dynamic metadata-driven catalogs with scheduled regular refreshes
 - `85602cf` feat: attach respective book covers to episodes and collection cover to series
