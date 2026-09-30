@@ -11,7 +11,8 @@
     "recs:profiles": "node scripts/nuvio-profiles.js",
     "recs:inspect": "node scripts/nuvio-inspect.js",
     "recs:list": "node scripts/nuvio-list.js",
-    "recs:refresh": "node scripts/refresh-recs.js"
+    "recs:refresh": "node scripts/refresh-recs.js",
+    "test:serve": "node test/recs.serve.js"
   },
   "engines": {
     "node": ">=18"

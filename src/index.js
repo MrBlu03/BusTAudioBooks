@@ -6,10 +6,10 @@ try {
 
 const express = require("express");
 const crypto = require("crypto");
-const { manifest } = require("./manifest");
+const { manifest, buildManifest } = require("./manifest");
 const genres = require("./genres");
 const { resolveGenre } = genres;
-const { getRecs } = require("./recs");
+const { getRecs, hasRecs } = require("./recs");
 const { decodeConfig } = require("./config");
 const { searchAudiobooks, searchComics, qualityScore, comicQualityScore } = require("./sources");
 const { enrich } = require("./metadata");
@@ -225,12 +225,15 @@ app.get("/:config/configure", sendConfigure);
 
 // ---- Manifest ---------------------------------------------------------------
 function handleManifest(req, res) {
+  // Only advertise the recommendations row when it has something to show, so a
+  // shared install does not offer everyone an empty category.
+  const man = buildManifest({ withRecs: hasRecs() });
   const cfg = req.params.config ? decodeConfig(req.params.config) : (process.env.TORBOX_API_KEY ? { apiKey: process.env.TORBOX_API_KEY } : null);
   if (cfg && cfg.apiKey) {
-    return res.json({ ...manifest, behaviorHints: { ...manifest.behaviorHints, configurationRequired: false } });
+    return res.json({ ...man, behaviorHints: { ...man.behaviorHints, configurationRequired: false } });
   }
   // If not configured yet, still serve manifest so Nuvio/Stremio can read metadata & configuration link
-  return res.json(manifest);
+  return res.json(man);
 }
 app.get("/manifest.json", handleManifest);
 app.get("/:config/manifest.json", handleManifest);

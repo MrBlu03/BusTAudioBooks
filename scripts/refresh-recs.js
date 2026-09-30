@@ -274,6 +274,27 @@ function extractJson(stdout) {
 }
 
 /**
+ * Reject titles that are not a plain book name.
+ *
+ * The small free models pad their answers: "Project Hail Mary's companion: The
+ * Martian", "The Hobbit illustrated edition narrated by Andy Serkis", "Children
+ * of the Vechta / The Rules of Magic — Six of Crows". None of those is a title
+ * an index will ever match, so they are dropped rather than searched for.
+ */
+const DIRTY_TITLE =
+  /\b(companion|illustrated|narrated by|unabridged|abridged|edition|box set|omnibus|audiobook edition|summary|analysis)\b|[/:]|\s[-–—]\s|\s--\s|\d{4}/i;
+
+function isPlausibleTitle(title) {
+  const t = String(title || "").trim();
+  if (t.length < 3 || t.length > 120) return false;
+  if (DIRTY_TITLE.test(t)) return false;
+  // A real book title has letters and is not mostly punctuation/digits.
+  const letters = (t.match(/[a-z]/gi) || []).length;
+  if (letters < t.length * 0.5) return false;
+  return true;
+}
+
+/**
  * Coerce whatever the model returned into [{title, author, reason}].
  * @param parsed      whatever extractJson() produced
  * @param libraryTitles array of plain title strings already owned by the user
@@ -290,11 +311,16 @@ function normaliseRecs(parsed, libraryTitles) {
   const have = new Set(libraryTitles.filter(Boolean).map((t) => String(t).trim().toLowerCase()));
   const out = [];
   const seen = new Set();
+  let dropped = 0;
   for (const r of rows) {
     if (!r) continue;
     // Tolerate {title,author} or {name,by} or a bare string.
     const title = String(r.title || r.name || (typeof r === "string" ? r : "") || "").trim();
     if (!title || title.length < 2) continue;
+    if (!isPlausibleTitle(title)) {
+      dropped++;
+      continue;
+    }
     const author = String(r.author || r.by || r.writer || "").trim() || null;
     const reason = String(r.reason || r.why || r.description || "").trim().slice(0, 200) || null;
     const key = `${title}|${author || ""}`.toLowerCase();
@@ -302,6 +328,9 @@ function normaliseRecs(parsed, libraryTitles) {
     if (have.has(title.toLowerCase())) continue; // already in the library
     seen.add(key);
     out.push({ title, author, reason });
+  }
+  if (dropped) {
+    console.log(`Dropped ${dropped} malformed title(s) the model padded in.`);
   }
   return out;
 }
@@ -384,6 +413,16 @@ function buildPrompt(books) {
     "",
     "Do not recommend anything already in the list above.",
     "",
+    "How to write each title — this matters more than it looks:",
+    "- Give the plain, canonical English book title and nothing else.",
+    "- No subtitles, no colons, no series position, no edition names.",
+    '- Bad: "Sapiens: A Brief History of Humankind", "Dune: Book 1".',
+    '- Good: "Sapiens", "Dune".',
+    "- No narrator, no 'narrated by', no 'illustrated edition', no 'unabridged'.",
+    "- No commentary of any kind: no 'companion to', no 'summary of'.",
+    "- One book per entry. Never join two books with a slash or a dash.",
+    "- Never include a year.",
+    "",
     "Reply with ONLY a JSON array, no prose and no code fence, like:",
     '[{"title":"Book Name","author":"Author Name","reason":"One short sentence."}]',
   ].join("\n");
@@ -391,7 +430,7 @@ function buildPrompt(books) {
 
 // -- main ---------------------------------------------------------------------
 
-(async () => {
+async function main() {
   loadDotEnv();
 
   const force = process.argv.includes("--force");
@@ -483,12 +522,21 @@ function buildPrompt(books) {
 
   if (!resolved.length) {
     console.log(
-      "\nNothing resolved. The model suggested titles this index does not carry —\n" +
-        "that is an index-coverage limit, not a failure. Try a different RECS_MODEL,\n" +
-        "or raise RECS_COUNT so more candidates are tried."
+      "\nNothing resolved. Either the index does not carry these titles, or the\n" +
+        "source was unreachable during resolution (an unreachable source returns no\n" +
+        "results, which looks the same as a missing book). Try again later, a\n" +
+        "different RECS_MODEL, or raise RECS_COUNT so more candidates are tried."
     );
   }
-})().catch((err) => {
-  console.error("Failed:", err.message);
-  process.exit(1);
-});
+}
+
+// Exported so the parsing and title filter can be unit tested without running
+// the whole generation (which needs credentials and spends tokens).
+module.exports = { extractJson, normaliseRecs, isPlausibleTitle, buildPrompt, runModel };
+
+if (require.main === module) {
+  main().catch((err) => {
+    console.error("Failed:", err.message);
+    process.exit(1);
+  });
+}
