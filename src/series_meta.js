@@ -56,8 +56,14 @@ async function fetchSeriesFromAudible(seriesName, author = "") {
   const products = Array.isArray(data.products) ? data.products : [];
   if (!products.length) return null;
 
-  const lowerTarget = cleanName.toLowerCase();
-  const lowerAuthor = String(author || "").toLowerCase().trim();
+  const norm = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  const normTarget = norm(cleanName);
+  const normAuthor = norm(author);
+
+  // Check if any product has an exact series title match
+  const hasExactSeriesMatch = products.some((p) =>
+    (p.series || []).some((s) => norm(s.title) === normTarget)
+  );
 
   // Filter products belonging to this series
   const candidates = [];
@@ -72,16 +78,24 @@ async function fetchSeriesFromAudible(seriesName, author = "") {
       continue;
     }
 
+    // Author filtering: if author is provided, ensure author compatibility
+    const pAuthors = (p.authors || []).map((a) => norm(a.name));
+    if (normAuthor && pAuthors.length > 0 && !pAuthors.some((a) => a.includes(normAuthor) || normAuthor.includes(a))) {
+      continue;
+    }
+
     const seriesList = Array.isArray(p.series) ? p.series : [];
     const pubSeries = seriesList.find((s) => /publication\s*order|release\s*order/i.test(s.title));
     const chronoSeries = seriesList.find((s) => /chronological|author'?s\s*(?:preferred\s*)?order/i.test(s.title));
-    // Prioritize exact series title match first, then substring
+    // Prioritize exact series title match first; only fallback to substring if no product had an exact match
     const matchedSeries =
-      seriesList.find((s) => String(s.title || "").toLowerCase() === lowerTarget) ||
-      seriesList.find((s) => {
-        const st = String(s.title || "").toLowerCase();
-        return st.includes(lowerTarget) || lowerTarget.includes(st);
-      });
+      seriesList.find((s) => norm(s.title) === normTarget) ||
+      (!hasExactSeriesMatch
+        ? seriesList.find((s) => {
+            const st = norm(s.title);
+            return st.includes(normTarget) || normTarget.includes(st);
+          })
+        : null);
 
     if (!matchedSeries && !pubSeries && !chronoSeries) continue;
 
@@ -323,7 +337,7 @@ async function findCollectionCover(seriesName, author = "") {
 const pubYearCache = new TTLCache(24 * 60 * 60 * 1000, 2000);
 
 /**
- * Dynamically queries Open Library for a book's original publication year.
+ * Dynamically queries Wikipedia Summary API and Open Library for a book's original publication year.
  */
 async function fetchPublicationYear(title, author) {
   if (!title) return null;
@@ -331,22 +345,72 @@ async function fetchPublicationYear(title, author) {
   const hit = pubYearCache.get(key);
   if (hit !== undefined) return hit;
 
+  const lowerTitle = String(title).toLowerCase().trim();
+
+  // 1. Wikipedia Summary API (high speed, accurate first publication date)
   try {
-    const q = new URLSearchParams({
-      title: title,
-      limit: "1",
+    const q = `"${title}" ${author || ""}`;
+    const sRes = await fetch("https://en.wikipedia.org/w/api.php?action=query&list=search&format=json&srlimit=5&srsearch=" + encodeURIComponent(q), {
+      headers: { "User-Agent": "BusTAudioBooks/2.5 (contact@github.com)" },
+      signal: AbortSignal.timeout(1800),
     });
+    if (sRes.ok) {
+      const sData = await sRes.json();
+      const hits = (sData?.query?.search || []).filter((h) => !/\b(?:series|franchise|universe|adaptations?)\b/i.test(h.title));
+      // Prioritize explicit novel/book pages first, then exact title, then substrings
+      const matchHit =
+        hits.find((h) => /\((?:novel|book|[a-z]+\s+novel)\)/i.test(h.title) && h.title.toLowerCase().includes(lowerTitle)) ||
+        hits.find((h) => {
+          const ht = h.title.toLowerCase().replace(/\s*\([^)]*\)/g, "").trim();
+          return ht === lowerTitle;
+        }) ||
+        hits.find((h) => {
+          const ht = h.title.toLowerCase().replace(/\s*\([^)]*\)/g, "").trim();
+          return ht.includes(lowerTitle) || lowerTitle.includes(ht);
+        }) ||
+        hits[0];
+
+      const orderedHits = matchHit ? [matchHit, ...hits.filter((x) => x !== matchHit)] : hits;
+
+      for (const h of orderedHits.slice(0, 2)) {
+        if (!h || !h.title) continue;
+        const pRes = await fetch("https://en.wikipedia.org/api/rest_v1/page/summary/" + encodeURIComponent(h.title), {
+          headers: { "User-Agent": "BusTAudioBooks/2.5 (contact@github.com)" },
+          signal: AbortSignal.timeout(1800),
+        });
+        if (pRes.ok) {
+          const pData = await pRes.json();
+          const extract = pData?.extract || "";
+          const pubMatch =
+            extract.match(/(?:published|released|appeared)\s+(?:in\s+)?\b(18\d\d|19\d\d|20[0-2]\d)\b/i) ||
+            extract.match(/\b(18\d\d|19\d\d|20[0-2]\d)\b(?:\s+novel|\s+science\s+fiction\s+novel|\s+dystopian|\s+fantasy)/i) ||
+            extract.match(/\b(18\d\d|19\d\d|20[0-2]\d)\b/);
+          if (pubMatch) {
+            const yr = parseInt(pubMatch[1], 10);
+            if (yr >= 1800 && yr <= new Date().getFullYear()) {
+              pubYearCache.set(key, yr);
+              return yr;
+            }
+          }
+        }
+      }
+    }
+  } catch (_) {}
+
+  // 2. Open Library fallback
+  try {
+    const q = new URLSearchParams({ title: title, limit: "1" });
     if (author) q.set("author", author);
     const res = await fetch(`https://openlibrary.org/search.json?${q.toString()}`, {
       headers: { "User-Agent": "bustaudio-addon/2.5" },
-      signal: AbortSignal.timeout(800),
+      signal: AbortSignal.timeout(1200),
     });
     if (res.ok) {
       const data = await res.json();
       const doc = data.docs && data.docs[0];
       if (doc && doc.first_publish_year) {
         const year = parseInt(doc.first_publish_year, 10);
-        if (!isNaN(year) && year > 1000 && year <= new Date().getFullYear()) {
+        if (!isNaN(year) && year >= 1800 && year <= new Date().getFullYear()) {
           pubYearCache.set(key, year);
           return year;
         }
@@ -390,20 +454,23 @@ async function fetchSeriesBooks(seriesName, author = "") {
     }
 
     if (seriesObj && Array.isArray(seriesObj.books) && seriesObj.books.length > 0) {
-      // Enrich books with publication years concurrently (sample first 6 books to detect reading order)
-      const booksToEnrich = seriesObj.books.slice(0, 6);
-      await Promise.all(
-        booksToEnrich.map(async (b) => {
-          if (!b.originalYear) {
-            const y = await withTimeout(
-              fetchPublicationYear(b.title, b.author || seriesObj.author || author),
-              800,
-              null
-            );
-            if (y) b.originalYear = y;
-          }
-        })
-      );
+      const hasPubSeq = seriesObj.books.some((b) => b.pubSeq != null);
+      if (!hasPubSeq) {
+        // Enrich books concurrently with publication years
+        const booksToEnrich = seriesObj.books.slice(0, 8);
+        await Promise.all(
+          booksToEnrich.map(async (b) => {
+            if (!b.originalYear) {
+              const y = await withTimeout(
+                fetchPublicationYear(b.title, b.author || seriesObj.author || author),
+                1500,
+                null
+              );
+              if (y) b.originalYear = y;
+            }
+          })
+        );
+      }
 
       // Chronological reading order (in-universe sequence)
       const chronoBooks = [...seriesObj.books].sort((a, b) => {
@@ -412,13 +479,15 @@ async function fetchSeriesBooks(seriesName, author = "") {
         return sa - sb;
       });
 
-      // Release / publication order (by original publication year or release sequence)
+      // Release / publication order (by pubSeq or original publication year)
       const releaseBooks = [...seriesObj.books].sort((a, b) => {
-        const pa = a.pubSeq != null ? a.pubSeq : (a.originalYear != null ? a.originalYear : null);
-        const pb = b.pubSeq != null ? b.pubSeq : (b.originalYear != null ? b.originalYear : null);
-        if (pa != null && pb != null && pa !== pb) return pa - pb;
-        if (pa != null && pb == null) return -1;
-        if (pa == null && pb != null) return 1;
+        if (hasPubSeq) {
+          const pa = a.pubSeq != null ? a.pubSeq : 999;
+          const pb = b.pubSeq != null ? b.pubSeq : 999;
+          if (pa !== pb) return pa - pb;
+        } else if (a.originalYear != null && b.originalYear != null && a.originalYear !== b.originalYear) {
+          return a.originalYear - b.originalYear;
+        }
 
         const sa = a.chronoSeq != null ? a.chronoSeq : (a.seq != null ? a.seq : 999);
         const sb = b.chronoSeq != null ? b.chronoSeq : (b.seq != null ? b.seq : 999);

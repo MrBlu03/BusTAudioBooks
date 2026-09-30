@@ -757,33 +757,58 @@ async function handleCatalog(req, res, extraRaw) {
   // Expand multi-book series packs into separate individual books and exclude omnibus bundles
   const expandedItems = expandSeriesPacks(finalItems, searchQuery);
 
-  // Deduplicate releases so each distinct book appears only once (Option A),
-  // keeping the highest quality / instant-cached release per book.
-  const seenBooks = new Set();
-  const deduped = [];
-  for (const r of expandedItems) {
-    if (!r.seriesInfo) r.seriesInfo = parseSeriesAndBook(r.name, r.author, searchQuery);
-    const key = getBookKey(r.name, r.author, searchQuery);
-    if (!seenBooks.has(key)) {
-      seenBooks.add(key);
-      deduped.push(r);
-    }
-  }
-
   let seriesCard = null;
   let isQueryingSeries = false;
+  let seriesCandidate = null;
 
   if (query) {
     try {
-      const seriesCandidate = await withTimeout(fetchSeriesBooks(cleanSeriesQuery(query)), 2500, null);
+      // 1. Check if query is directly a series name
+      const cleanQ = cleanSeriesQuery(query);
+      if (cleanQ) {
+        seriesCandidate = await withTimeout(fetchSeriesBooks(cleanQ), 3500, null);
+      }
+
+      // 2. If no series found, check if query is a book that belongs to a series
+      if (!seriesCandidate || !Array.isArray(seriesCandidate.books) || seriesCandidate.books.length < 2) {
+        try {
+          const bookMeta = await withTimeout(audnexus.lookupAudnexus(query), 2000, null);
+          if (bookMeta && bookMeta.series) {
+            const detectedSeries = cleanSeriesQuery(bookMeta.series);
+            seriesCandidate = await withTimeout(fetchSeriesBooks(detectedSeries, bookMeta.author), 3500, null);
+          }
+        } catch (_) {}
+      }
+
+      // 3. If still no series, check if top search results indicate a common series
+      if (
+        (!seriesCandidate || !Array.isArray(seriesCandidate.books) || seriesCandidate.books.length < 2) &&
+        expandedItems.length > 0
+      ) {
+        for (const item of expandedItems.slice(0, 5)) {
+          const sInfo = parseSeriesAndBook(item.name, item.author, query);
+          if (sInfo && sInfo.seriesName && !sInfo.isCollection) {
+            const cand = await withTimeout(fetchSeriesBooks(cleanSeriesQuery(sInfo.seriesName), item.author), 3500, null);
+            if (cand && Array.isArray(cand.books) && cand.books.length >= 2) {
+              seriesCandidate = cand;
+              break;
+            }
+          }
+        }
+      }
+
       if (seriesCandidate && Array.isArray(seriesCandidate.books) && seriesCandidate.books.length >= 2) {
-        const cleanQ = cleanSeriesQuery(query).toLowerCase();
+        const cleanQLower = cleanSeriesQuery(query).toLowerCase();
         const snLower = seriesCandidate.seriesName.toLowerCase();
         isQueryingSeries =
-          cleanQ === snLower ||
-          snLower.includes(cleanQ) ||
-          cleanQ.includes(snLower) ||
-          /\b(?:series|saga|trilogy|collection|chronicles|sequence)\b/i.test(query);
+          cleanQLower === snLower ||
+          snLower.includes(cleanQLower) ||
+          cleanQLower.includes(snLower) ||
+          /\b(?:series|saga|trilogy|collection|chronicles|sequence)\b/i.test(query) ||
+          seriesCandidate.books.some((b) => {
+            const bt = b.title.toLowerCase();
+            return bt === cleanQLower || bt.includes(cleanQLower) || cleanQLower.includes(bt);
+          });
 
         if (isQueryingSeries) {
           const sAuthor = seriesCandidate.author || "";
@@ -808,6 +833,19 @@ async function handleCatalog(req, res, extraRaw) {
         }
       }
     } catch (_) {}
+  }
+
+  // Deduplicate releases so each distinct book appears only once (Option A),
+  // keeping the highest quality / instant-cached release per book.
+  const seenBooks = new Set();
+  const deduped = [];
+  for (const r of expandedItems) {
+    if (!r.seriesInfo) r.seriesInfo = parseSeriesAndBook(r.name, r.author, searchQuery);
+    const key = getBookKey(r.name, r.author, searchQuery, seriesCandidate);
+    if (!seenBooks.has(key)) {
+      seenBooks.add(key);
+      deduped.push(r);
+    }
   }
 
   // Sort books: series order if searching a series; prioritize collections/series if query is of a series

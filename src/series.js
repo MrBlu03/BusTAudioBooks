@@ -436,7 +436,44 @@ function parseSeriesAndBook(title, author = "", query = "") {
 }
 
 // Generate deduplication key: releases of the same book share this key
-function getBookKey(title, author = "", query = "") {
+function getBookKey(title, author = "", query = "", seriesCandidate = null) {
+  // If seriesCandidate is provided with canonical books, match directly
+  if (seriesCandidate && Array.isArray(seriesCandidate.books) && seriesCandidate.books.length > 0) {
+    const lower = String(title || "").toLowerCase();
+    const sName = seriesCandidate.seriesName.toLowerCase();
+
+    // 1. Multi-book collection / series pack / omnibus
+    const isCollection =
+      /\b(?:complete\s+(?:series|collection|saga|set)|all\s+\w+\s+books|saga\b|whole\s+series|box\s*set)\b/i.test(title) ||
+      /\b0?1\s*[-–—to]+\s*0?(?:6|7|8|9|10|20|27)\b/i.test(title) ||
+      /\bseries\s*\(\d+\s*[-–—]\s*\d+\)/i.test(title) ||
+      /(?:^|[\s\-_])trio?log(?:y|ia|ie|ía)\b/i.test(title);
+    if (isCollection) {
+      return `${sName}:collection:all`;
+    }
+
+    // 2. Check against canonical books (longest title first so longer subtitles match before single words)
+    const sortedBooks = [...seriesCandidate.books].sort((a, b) => b.title.length - a.title.length);
+    for (const b of sortedBooks) {
+      const bTitle = b.title.toLowerCase();
+      const escaped = bTitle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      let matches = false;
+      if (bTitle.length > 5) {
+        matches = new RegExp(`\\b${escaped}\\b`, "i").test(lower);
+      } else {
+        matches =
+          new RegExp(`(?:^|[-–—/:]|\\bby\\s+[^\\s]+\\s+)\\s*${escaped}\\b(?!\\s*(?:and|of|rpg|[-–—:]\\s*heroes|[-–—:]\\s*the))`, "i").test(lower) &&
+          !/\b(?:princess|heretics|chapterhouse|children|emperor|messiah|house|dunes)\b/i.test(lower);
+      }
+      if (matches) {
+        return `${sName}:book:${b.seq}`;
+      }
+      // Common localized translations (e.g. Spanish/Dutch/German)
+      if (b.seq === 2 && /\bmessia[sh]\b/i.test(lower)) return `${sName}:book:2`;
+      if (b.seq === 5 && /\bherejes\b/i.test(lower)) return `${sName}:book:5`;
+    }
+  }
+
   const seriesInfo = parseSeriesAndBook(title, author, query);
   if (seriesInfo.seriesName && seriesInfo.bookNumber != null) {
     if (seriesInfo.isCollection) {
@@ -451,7 +488,7 @@ function getBookKey(title, author = "", query = "") {
     .replace(/\[[^\]]*\]/g, " ")
     .replace(/\([^)]*\)/g, " ")
     .replace(/\{[^}]*\}/g, " ")
-    .replace(/\b(chapterized|unabridged|abridged|complete|retail|edition|reup|mp3|m4b|m4a|flac|aac|audiobooks?|audio\s*book|narrated\s*by)\b/gi, " ")
+    .replace(/\b(?:chapterized|unabridged|abridged|complete|retail|edition|reup|mp3|m4b|m4a|flac|aac|audiobooks?|audio\s*book|narrated\s*by|read\s*by|editors?|series\s*editor)\b/gi, " ")
     .replace(/[^a-z0-9]+/g, " ")
     .trim();
 
