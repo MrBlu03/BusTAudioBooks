@@ -1,5 +1,5 @@
 # BusTAudioBooks — Handover Brief
-Commit `74da3e5`, tree clean, nothing pushed. Freshly built image verified running in the container.
+Commit `9cddef2`, tree clean, nothing pushed. Freshly built image verified running in the container.
 
 ## 1. Standing constraints — do not break these
 - **No GitHub work.** `AFK-Goblin` is not the user's account. Commits stay local on `main`. Never push, create a repo, or install `gh`.
@@ -10,9 +10,9 @@ Commit `74da3e5`, tree clean, nothing pushed. Freshly built image verified runni
 ## 2. Verified state
 | Check | Result |
 | --- | --- |
-| `npm test` | 124 pass, 0 fail |
+| `npm test` | 150 pass, 0 fail |
 | `npm run test:serve` | all checks passed |
-| Manifest | v2.4.0, 45 genre options, recs advertised |
+| Manifest | v2.5.1, 45 genre options, recs advertised |
 | Recs resolution | 14 of 14 |
 | Recs serving | 14 across 2 pages (`PAGE_SIZE = 12`) |
 | Containers | `backend`, `jackett`, `flaresolverr`, `warp` — all Up |
@@ -53,6 +53,11 @@ Genre rows sampled live: Horror / In Your TorBox / Popular Series / Science Fict
 - Nuvio credentials were pasted into chat; they live in gitignored `.env`. Rotation was recommended and needs confirming.
 
 ## 8. Commits (newest first)
+- `9cddef2` feat: implement dynamic metadata-driven catalogs with scheduled regular refreshes
+- `85602cf` feat: attach respective book covers to episodes and collection cover to series
+- `20c41bf` feat: prioritize book series in search results when query matches a book series
+- `573e218` feat: implement metadata-level series generation and dynamic episode torrent resolution
+- `d1cfb54` feat: implement dynamic episodic series for multi-book collections without hardcoding
 - `74da3e5` Resolve recs through Jackett when the mirror is dead
 - `f138cd8` Salvage truncated model output; check the index is up first
 - `de67a14` Resolve recs offline, filter malformed titles, gate the row
