@@ -1,5 +1,5 @@
 # BusTAudioBooks — Handover Brief
-Commit `3e90f43`, tree clean, nothing pushed. Freshly built image verified running in the container.
+Commit `766bd56`, tree clean, nothing pushed. Freshly built image verified running in the container.
 
 ## 1. Standing constraints — do not break these
 - **No GitHub work.** `AFK-Goblin` is not the user's account. Commits stay local on `main`. Never push, create a repo, or install `gh`.
@@ -10,14 +10,15 @@ Commit `3e90f43`, tree clean, nothing pushed. Freshly built image verified runni
 ## 2. Verified state
 | Check | Result |
 | --- | --- |
-| `npm test` | 163 pass, 0 fail |
+| `npm test` | 166 pass, 0 fail |
 | `npm run test:serve` | all checks passed |
 | Manifest | v2.5.1, 45 genre options, recs advertised |
 | Recs resolution | 14 of 14 |
 | Recs serving | 14 across 2 pages (`PAGE_SIZE = 12`) |
 | Series Reading Orders | Dynamic dual orders verified for Foundation (1951..1993 Release vs Prelude..Earth Chronological) & Narnia; canonical 6 books for Dune without spinoff duplicates |
+| Foundation Metadata Purity | Verified zero finance book pollution: A. C. Knapp metadata rejected, Isaac Asimov series meta & collection poster strictly preserved |
 | Episode ID Uniqueness | Verified globally unique episode item IDs across Season 1 and Season 2 via season discrimination |
-| Search Prioritization | Searching a series or a book in a series (e.g. "Dune Messiah", "Second Foundation") prepends the full series card at #0 |
+| Search Prioritization | Searching a series or a book in a series (e.g. "Dune Messiah", "Second Foundation", "Foundation") prepends the full series card at #0 |
 | Search Deduplication | Dynamic deduplication collapses duplicate releases and duplicate collection packs cleanly |
 | Reliability & Hardening | Resilient timeouts on TorBox and Jackett fetches; client disconnect guards in Express handlers; safe array checking on torrent files; HTML entity decoding and zero-width/NBSP whitespace cleaning |
 | Containers | `backend`, `jackett`, `flaresolverr`, `warp` — all Up |
@@ -58,6 +59,7 @@ Genre rows sampled live: Horror / In Your TorBox / Popular Series / Science Fict
 - Nuvio credentials were pasted into chat; they live in gitignored `.env`. Rotation was recommended and needs confirming.
 
 ## 8. Commits (newest first)
+- `766bd56` fix: resolve Foundation series metadata mismatch, dual reading orders, and collection deduplication
 - `3e90f43` feat: fix series release orders, prioritize series in search, and deduplicate results
 - `e8679ab` feat: default recommended series books to series view with deduplication
 - `af80740` feat: implement dual chronological and release reading orders and daily recommendation refresh
