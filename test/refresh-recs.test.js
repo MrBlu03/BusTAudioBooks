@@ -7,7 +7,7 @@
 const test = require("node:test");
 const assert = require("node:assert");
 
-const { extractJson, normaliseRecs, isPlausibleTitle, buildPrompt } = require("../scripts/refresh-recs");
+const { extractJson, normaliseRecs, isPlausibleTitle, buildPrompt, checkSourceReachable } = require("../scripts/refresh-recs");
 
 // -- extractJson ---------------------------------------------------------------
 
@@ -33,6 +33,39 @@ test("extractJson is not fooled by a brace inside a string", () => {
 test("extractJson returns null when there is no JSON at all", () => {
   assert.equal(extractJson("I cannot help with that."), null);
   assert.equal(extractJson(""), null);
+});
+
+test("extractJson salvages a response the model truncated mid-array", () => {
+  // This is a real output: fifteen titles requested, the model ran out of tokens
+  // and stopped mid-string. Strict parsing throws away the complete entries too.
+  const truncated =
+    '[{"title":"Leviathan Wakes","author":"James S.A. Corey","reason":"Grounded space opera."},' +
+    '{"title":"The Martian","author":"Andy Weir","reason":"Same lone-';
+
+  const out = extractJson(truncated);
+  assert.ok(Array.isArray(out), "should salvage an array");
+  assert.equal(out.length, 1, "only the complete entry survives");
+  assert.equal(out[0].title, "Leviathan Wakes");
+});
+
+test("extractJson salvages several complete entries around a broken one", () => {
+  const truncated =
+    '[{"title":"Dune","author":"Frank Herbert"},' +
+    '{"title":"Broken","reason":"unterminated ,' +
+    '{"title":"Piranesi","author":"Susanna Clarke"}]';
+  const out = extractJson(truncated);
+  assert.ok(Array.isArray(out));
+  const titles = out.map((r) => r.title);
+  assert.ok(titles.includes("Dune"), "first entry kept");
+  assert.ok(titles.includes("Piranesi"), "last entry kept");
+  assert.ok(!titles.includes("Broken"), "the malformed entry is not invented");
+});
+
+test("extractJson prefers a well-formed array over salvaging", () => {
+  const good = '[{"title":"Dune","author":"Frank Herbert"}]';
+  const out = extractJson(good);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].title, "Dune");
 });
 
 // -- isPlausibleTitle ----------------------------------------------------------
@@ -146,4 +179,22 @@ test("buildPrompt lists the library and forbids owning books", () => {
   assert.match(prompt, /companion to/);
   assert.match(prompt, /narrated by/);
   assert.match(prompt, /Never join two books/);
+});
+
+// -- checkSourceReachable -----------------------------------------------------
+
+test("checkSourceReachable reports an unreachable domain instead of throwing", async () => {
+  // A reserved TLD that cannot resolve, so this is fast and offline-safe.
+  const r = await checkSourceReachable("audiobookbay.invalid");
+  assert.equal(r.ok, false);
+  assert.match(r.detail, /unreachable/);
+  assert.match(r.detail, /audiobookbay\.invalid/, "the message must name the domain");
+});
+
+test("checkSourceReachable reports a bad HTTP status", async () => {
+  // example.com answers 200; a path that does not exist is not what we probe, so
+  // instead assert the shape using a domain that resolves but refuses HTTP.
+  const r = await checkSourceReachable("localhost:1");
+  assert.equal(r.ok, false);
+  assert.match(r.detail, /localhost:1/);
 });

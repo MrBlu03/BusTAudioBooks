@@ -270,7 +270,52 @@ function extractJson(stdout) {
       }
     }
   }
-  return null;
+  return salvageObjects(text);
+}
+
+/**
+ * Last resort for a response the model ran out of output tokens part-way
+ * through. Observed for real: fifteen requested titles produced a valid array
+ * that stopped mid-string, `"reason":"Same lone-`, and strict parsing threw the
+ * whole thing away even though the first several entries were complete.
+ *
+ * So pull out every balanced `{...}` and keep the ones that parse. A short list
+ * is fine here — the caller already drops anything unusable, and a partial
+ * answer still beats none at all.
+ */
+function salvageObjects(text) {
+  const out = [];
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] !== "{") continue;
+    let depth = 0;
+    let inStr = false;
+    let esc = false;
+    for (let j = i; j < text.length; j++) {
+      const ch = text[j];
+      if (inStr) {
+        if (esc) esc = false;
+        else if (ch === "\\") esc = true;
+        else if (ch === '"') inStr = false;
+        continue;
+      }
+      if (ch === '"') inStr = true;
+      else if (ch === "{") depth++;
+      else if (ch === "}") {
+        depth--;
+        if (depth === 0) {
+          try {
+            const obj = JSON.parse(text.slice(i, j + 1));
+            if (obj && typeof obj === "object" && !Array.isArray(obj)) out.push(obj);
+          } catch (_) {
+            /* incomplete object, keep scanning */
+          }
+          i = j; // continue after this object
+          break;
+        }
+      }
+    }
+  }
+  return out.length ? out : null;
 }
 
 /**
@@ -338,6 +383,41 @@ function normaliseRecs(parsed, libraryTitles) {
 // -- resolution ---------------------------------------------------------------
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Is the source actually up?
+ *
+ * Without this, an unreachable index and a genuine coverage miss look identical:
+ * every search returns nothing, and the run reports "0 of 15 are actually in the
+ * index" — which blames the index for what is really a dead domain. ABB mirrors
+ * go down and change address often, so this is a routine failure, not an edge
+ * case. One cheap request settles it before spending a minute on 15 searches.
+ *
+ * @returns {Promise<{ok: boolean, detail: string}>}
+ */
+async function checkSourceReachable(domain) {
+  const started = Date.now();
+  try {
+    const res = await fetch(`https://${domain}/`, {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+        Accept: "text/html",
+      },
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!res.ok) {
+      return { ok: false, detail: `${domain} answered HTTP ${res.status}` };
+    }
+    await res.text();
+    return { ok: true, detail: `${domain} reachable in ${Date.now() - started}ms` };
+  } catch (err) {
+    return {
+      ok: false,
+      detail: `${domain} unreachable after ${Date.now() - started}ms: ${err.message}`,
+    };
+  }
+}
 
 /**
  * Turn each recommendation into a playable release.
@@ -497,10 +577,23 @@ async function main() {
     process.exit(1);
   }
 
-  console.log(`\n${recs.length} recommendations in ${secs}s. Resolving to playable releases...`);
-  const resolved = await resolveRecs(recs, {
-    abbDomain: process.env.ABB_DOMAIN || "audiobookbay.lu",
-  });
+  const abbDomain = process.env.ABB_DOMAIN || "audiobookbay.lu";
+  console.log(`\n${recs.length} recommendations in ${secs}s.`);
+
+  // Check the source before spending a minute on searches that cannot succeed.
+  const reach = await checkSourceReachable(abbDomain);
+  if (!reach.ok) {
+    console.error(`\nCannot resolve: ${reach.detail}`);
+    console.error(
+      "Suggestions were generated but no release could be looked up. This is the\n" +
+        "index being unreachable, not a coverage problem — ABB mirrors change domain\n" +
+        "often. Update ABB_DOMAIN in .env to a working mirror and run this again."
+    );
+    process.exit(1);
+  }
+  console.log(`${reach.detail}. Resolving to playable releases...`);
+
+  const resolved = await resolveRecs(recs, { abbDomain });
 
   const payload = {
     generatedAt: new Date().toISOString(),
@@ -532,7 +625,14 @@ async function main() {
 
 // Exported so the parsing and title filter can be unit tested without running
 // the whole generation (which needs credentials and spends tokens).
-module.exports = { extractJson, normaliseRecs, isPlausibleTitle, buildPrompt, runModel };
+module.exports = {
+  extractJson,
+  normaliseRecs,
+  isPlausibleTitle,
+  buildPrompt,
+  runModel,
+  checkSourceReachable,
+};
 
 if (require.main === module) {
   main().catch((err) => {
