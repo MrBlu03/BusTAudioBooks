@@ -17,7 +17,7 @@ const { encodeItemId, decodeItemId } = require("./itemid");
 const { TTLCache, pLimit, withTimeout } = require("./cache");
 const { makeAccess } = require("./access");
 const { getBookKey, sortInSeriesOrder, parseSeriesAndBook, cleanDisplayTitle, cleanEpisodeTitle, expandSeriesPacks } = require("./series");
-const { fetchSeriesMeta } = require("./series_meta");
+const { fetchSeriesMeta, fetchSeriesBooks, cleanSeriesQuery } = require("./series_meta");
 const torbox = require("./torbox");
 const nuvio = require("./nuvio");
 
@@ -609,8 +609,47 @@ async function handleCatalog(req, res, extraRaw) {
     }
   }
 
-  // Sort books: series order if searching a series; otherwise preserve cached/quality ranking
-  const ordered = searchQuery ? sortInSeriesOrder(deduped) : deduped;
+  let seriesCard = null;
+  let isQueryingSeries = false;
+
+  if (query) {
+    try {
+      const seriesCandidate = await withTimeout(fetchSeriesBooks(cleanSeriesQuery(query)), 2500, null);
+      if (seriesCandidate && Array.isArray(seriesCandidate.books) && seriesCandidate.books.length >= 2) {
+        const cleanQ = cleanSeriesQuery(query).toLowerCase();
+        const snLower = seriesCandidate.seriesName.toLowerCase();
+        isQueryingSeries =
+          cleanQ === snLower ||
+          snLower.includes(cleanQ) ||
+          cleanQ.includes(snLower) ||
+          /\b(?:series|saga|trilogy|collection|chronicles|sequence)\b/i.test(query);
+
+        if (isQueryingSeries) {
+          const sAuthor = seriesCandidate.author || "";
+          const sPoster = (seriesCandidate.books[0] && seriesCandidate.books[0].poster) || undefined;
+          seriesCard = {
+            id: encodeItemId({
+              type: "series",
+              isSeries: true,
+              seriesName: seriesCandidate.seriesName,
+              name: `${seriesCandidate.seriesName} (Series)`,
+              author: sAuthor,
+            }),
+            type: "series",
+            name: `${seriesCandidate.seriesName} Series${sAuthor ? ` — ${sAuthor}` : ""}`,
+            poster: sPoster,
+            posterShape: "square",
+            description: `📚 Full Series (${seriesCandidate.books.length} Books in Reading Order)${sAuthor ? ` · By ${sAuthor}` : ""}`,
+          };
+        }
+      }
+    } catch (_) {}
+  }
+
+  // Sort books: series order if searching a series; prioritize collections/series if query is of a series
+  const ordered = searchQuery
+    ? sortInSeriesOrder(deduped, { prioritizeSeries: isQueryingSeries })
+    : deduped;
 
   // Paginate according to skip so users can scroll infinitely through audiobooks
   const paged = query ? ordered : ordered.slice(skip, skip + PAGE_SIZE);
@@ -654,6 +693,12 @@ async function handleCatalog(req, res, extraRaw) {
         ]) || r.tracker,
     };
   });
+
+  // If the query is of a book series, prepend the comprehensive Series card at the top
+  if (seriesCard && skip === 0) {
+    metas.unshift(seriesCard);
+  }
+
   res.json({ metas });
 }
 
@@ -937,12 +982,61 @@ app.get("/:config/app/search", async (req, res) => {
       deduped.push(r);
     }
   }
-  const ordered = sortInSeriesOrder(deduped);
 
-  res.json({
-    results: ordered.map((r) => ({
-      id: encodeItemId(r),
-      type,
+  let seriesAppResult = null;
+  let isQueryingSeries = false;
+
+  if (type === "audiobook") {
+    try {
+      const seriesCandidate = await withTimeout(fetchSeriesBooks(cleanSeriesQuery(query)), 2500, null);
+      if (seriesCandidate && Array.isArray(seriesCandidate.books) && seriesCandidate.books.length >= 2) {
+        const cleanQ = cleanSeriesQuery(query).toLowerCase();
+        const snLower = seriesCandidate.seriesName.toLowerCase();
+        isQueryingSeries =
+          cleanQ === snLower ||
+          snLower.includes(cleanQ) ||
+          cleanQ.includes(snLower) ||
+          /\b(?:series|saga|trilogy|collection|chronicles|sequence)\b/i.test(query);
+
+        if (isQueryingSeries) {
+          const sAuthor = seriesCandidate.author || "";
+          const sPoster = (seriesCandidate.books[0] && seriesCandidate.books[0].poster) || null;
+          seriesAppResult = {
+            id: encodeItemId({
+              type: "series",
+              isSeries: true,
+              seriesName: seriesCandidate.seriesName,
+              name: `${seriesCandidate.seriesName} (Series)`,
+              author: sAuthor,
+            }),
+            type: "series",
+            title: `${seriesCandidate.seriesName} Series${sAuthor ? ` — ${sAuthor}` : ""}`,
+            author: sAuthor || null,
+            poster: sPoster,
+            format: "Series",
+            bitrate: null,
+            size: 0,
+            sizeText: `Full Series (${seriesCandidate.books.length} Books)`,
+            cached: true,
+            isSeries: true,
+          };
+        }
+      }
+    } catch (_) {}
+  }
+
+  const ordered = sortInSeriesOrder(deduped, { prioritizeSeries: isQueryingSeries });
+
+  const appResults = ordered.map((r) => {
+    const isCol = !!(r.seriesInfo && r.seriesInfo.isCollection);
+    return {
+      id: encodeItemId({
+        ...r,
+        isSeries: isCol,
+        type: isCol ? "series" : type,
+        seriesName: (r.seriesInfo && r.seriesInfo.seriesName) || undefined,
+      }),
+      type: isCol ? "series" : type,
       title: prettyName(r.name),
       author: r.author || null,
       poster: r.poster || null,
@@ -951,8 +1045,15 @@ app.get("/:config/app/search", async (req, res) => {
       size: r.size || 0,
       sizeText: torbox.formatBytes(r.size) || null,
       cached: !!r.cached,
-    })),
+      isSeries: isCol,
+    };
   });
+
+  if (seriesAppResult && page === 1) {
+    appResults.unshift(seriesAppResult);
+  }
+
+  res.json({ results: appResults });
 });
 
 // GET /:config/app/streams/:id  -> playable files for a book

@@ -110,6 +110,21 @@ test("sortInSeriesOrder sorts books 1..N, then collections, then standalones", (
   assert.equal(sorted[4].name, "The House Beyond the Dunes");
 });
 
+test("sortInSeriesOrder places collections first when prioritizeSeries is true", () => {
+  const items = [
+    { name: "Dune Messiah", seriesInfo: { bookNumber: 2 } },
+    { name: "The Dune Saga - All Six Books", seriesInfo: { bookNumber: 9999, isCollection: true } },
+    { name: "Dune", seriesInfo: { bookNumber: 1 } },
+    { name: "Children of Dune", seriesInfo: { bookNumber: 3 } },
+  ];
+
+  const sorted = sortInSeriesOrder(items, { prioritizeSeries: true });
+  assert.equal(sorted[0].name, "The Dune Saga - All Six Books");
+  assert.equal(sorted[1].name, "Dune");
+  assert.equal(sorted[2].name, "Dune Messiah");
+  assert.equal(sorted[3].name, "Children of Dune");
+});
+
 test("parseSeriesAndBook detects Isaac Asimov's Foundation series and rejects noise", () => {
   // Canonical series titles
   const b1 = parseSeriesAndBook("Foundation - Isaac Asimov [M4B] [64 Kbps]", "Isaac Asimov", "foundation");

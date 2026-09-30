@@ -471,8 +471,17 @@ function getBookKey(title, author = "", query = "") {
 }
 
 // Sort deduplicated items in series order (Book 1, Book 2... Collections, Standalones)
-function sortInSeriesOrder(items) {
+// When prioritizeSeries is true, complete series packs and collections are placed first.
+function sortInSeriesOrder(items, options = {}) {
+  const prioritizeSeries = typeof options === "boolean" ? options : !!options.prioritizeSeries;
   return [...items].sort((a, b) => {
+    const isColA = !!(a.isSeries || (a.seriesInfo && a.seriesInfo.isCollection));
+    const isColB = !!(b.isSeries || (b.seriesInfo && b.seriesInfo.isCollection));
+
+    if (prioritizeSeries && isColA !== isColB) {
+      return isColA ? -1 : 1;
+    }
+
     const na = a.seriesInfo ? a.seriesInfo.bookNumber : null;
     const nb = b.seriesInfo ? b.seriesInfo.bookNumber : null;
 
