@@ -369,7 +369,8 @@ async function handleCatalog(req, res, extraRaw) {
     }
     items = list.items.map((rec) => {
       const best = { ...rec.release, tracker: "AudiobookBay", seeders: 0 };
-      if (!best.name) best.name = rec.title;
+      // Prefer the clean book title from the recommendation over the messy release name
+      best.name = rec.title || best.name;
       if (rec.author) best.author = rec.author;
       if (rec.reason) best.reason = rec.reason;
       return best;
